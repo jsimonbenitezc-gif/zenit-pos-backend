@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { Customer, Order, sequelize } = require('../models');
-const { authenticate } = require('../middleware/auth');
+const { authenticate, isOwner } = require('../middleware/auth');
 const { Op } = require('sequelize');
 
 // GET /api/customers - Obtener todos los clientes
@@ -196,7 +196,7 @@ router.put('/:id', authenticate, async (req, res) => {
 });
 
 // DELETE /api/customers/:id - Soft delete (oculta el cliente, no lo borra)
-router.delete('/:id', authenticate, async (req, res) => {
+router.delete('/:id', authenticate, isOwner, async (req, res) => {
     try {
         const customer = await Customer.findOne({
             where: { id: req.params.id, active: true }

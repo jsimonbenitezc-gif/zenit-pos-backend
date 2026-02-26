@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { Category } = require('../models');
-const { authenticate } = require('../middleware/auth');
+const { authenticate, isOwner } = require('../middleware/auth');
 
 // GET /api/categories
 router.get('/', authenticate, async (req, res) => {
@@ -36,7 +36,7 @@ router.get('/:id', authenticate, async (req, res) => {
 });
 
 // POST /api/categories
-router.post('/', authenticate, async (req, res) => {
+router.post('/', authenticate, isOwner, async (req, res) => {
     try {
         const { name, emoji, image } = req.body;
 
@@ -53,7 +53,7 @@ router.post('/', authenticate, async (req, res) => {
 });
 
 // PUT /api/categories/:id
-router.put('/:id', authenticate, async (req, res) => {
+router.put('/:id', authenticate, isOwner, async (req, res) => {
     try {
         const category = await Category.findOne({
             where: { id: req.params.id, active: true }
@@ -74,7 +74,7 @@ router.put('/:id', authenticate, async (req, res) => {
 });
 
 // DELETE /api/categories/:id - Soft delete (oculta la categoría, no la borra)
-router.delete('/:id', authenticate, async (req, res) => {
+router.delete('/:id', authenticate, isOwner, async (req, res) => {
     try {
         const category = await Category.findOne({
             where: { id: req.params.id, active: true }

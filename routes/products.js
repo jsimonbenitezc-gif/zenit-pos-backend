@@ -109,7 +109,7 @@ router.get('/:id', authenticate, async (req, res) => {
 });
 
 // POST /api/products - Crear producto
-router.post('/', authenticate, async (req, res) => {
+router.post('/', authenticate, isOwner, async (req, res) => {
     try {
         const { name, description, price, stock, category_id, emoji, image } = req.body;
 
@@ -134,7 +134,7 @@ router.post('/', authenticate, async (req, res) => {
 });
 
 // PUT /api/products/:id - Actualizar producto
-router.put('/:id', authenticate, async (req, res) => {
+router.put('/:id', authenticate, isOwner, async (req, res) => {
     try {
         const product = await Product.findByPk(req.params.id);
 

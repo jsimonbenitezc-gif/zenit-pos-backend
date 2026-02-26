@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { Discount, Combo, ComboItem, Product, Category, sequelize } = require('../models');
-const { authenticate } = require('../middleware/auth');
+const { authenticate, isOwner } = require('../middleware/auth');
 
 // ============================================
 // DESCUENTOS
@@ -69,7 +69,7 @@ router.get('/discounts/:id', authenticate, async (req, res) => {
 });
 
 // POST /api/offers/discounts - Crear descuento
-router.post('/discounts', authenticate, async (req, res) => {
+router.post('/discounts', authenticate, isOwner, async (req, res) => {
     try {
         const { name, type, value, applies_to, target_id, start_date, end_date, active } = req.body;
 
@@ -108,7 +108,7 @@ router.post('/discounts', authenticate, async (req, res) => {
 });
 
 // PUT /api/offers/discounts/:id - Actualizar descuento
-router.put('/discounts/:id', authenticate, async (req, res) => {
+router.put('/discounts/:id', authenticate, isOwner, async (req, res) => {
     try {
         const discount = await Discount.findByPk(req.params.id);
         
@@ -135,16 +135,16 @@ router.put('/discounts/:id', authenticate, async (req, res) => {
     }
 });
 
-// DELETE /api/offers/discounts/:id - Eliminar descuento
-router.delete('/discounts/:id', authenticate, async (req, res) => {
+// DELETE /api/offers/discounts/:id - Eliminar descuento (soft delete)
+router.delete('/discounts/:id', authenticate, isOwner, async (req, res) => {
     try {
         const discount = await Discount.findByPk(req.params.id);
-        
+
         if (!discount) {
             return res.status(404).json({ error: 'Discount not found' });
         }
 
-        await discount.destroy();
+        await discount.update({ active: false });
         res.json({ message: 'Discount deleted successfully' });
     } catch (error) {
         res.status(500).json({ error: 'Error interno del servidor' });
@@ -318,7 +318,7 @@ router.get('/combos/:id', authenticate, async (req, res) => {
 });
 
 // POST /api/offers/combos - Crear combo
-router.post('/combos', authenticate, async (req, res) => {
+router.post('/combos', authenticate, isOwner, async (req, res) => {
     try {
         const { name, description, emoji, image, price, active } = req.body;
 
@@ -342,7 +342,7 @@ router.post('/combos', authenticate, async (req, res) => {
 });
 
 // PUT /api/offers/combos/:id - Actualizar combo
-router.put('/combos/:id', authenticate, async (req, res) => {
+router.put('/combos/:id', authenticate, isOwner, async (req, res) => {
     try {
         const combo = await Combo.findByPk(req.params.id);
         
@@ -368,16 +368,16 @@ router.put('/combos/:id', authenticate, async (req, res) => {
     }
 });
 
-// DELETE /api/offers/combos/:id - Eliminar combo
-router.delete('/combos/:id', authenticate, async (req, res) => {
+// DELETE /api/offers/combos/:id - Eliminar combo (soft delete)
+router.delete('/combos/:id', authenticate, isOwner, async (req, res) => {
     try {
         const combo = await Combo.findByPk(req.params.id);
-        
+
         if (!combo) {
             return res.status(404).json({ error: 'Combo not found' });
         }
 
-        await combo.destroy();
+        await combo.update({ active: false });
         res.json({ message: 'Combo deleted successfully' });
     } catch (error) {
         res.status(500).json({ error: 'Error interno del servidor' });
@@ -389,7 +389,7 @@ router.delete('/combos/:id', authenticate, async (req, res) => {
 // ============================================
 
 // POST /api/offers/combos/:id/items - Guardar items del combo
-router.post('/combos/:id/items', authenticate, async (req, res) => {
+router.post('/combos/:id/items', authenticate, isOwner, async (req, res) => {
     const t = await sequelize.transaction();
     
     try {

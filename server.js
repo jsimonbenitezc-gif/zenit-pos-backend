@@ -53,11 +53,7 @@ app.use('/api/offers', require('./routes/offers'));
 // Error handling
 app.use((err, req, res, next) => {
     console.error('Error:', err);
-    res.status(err.status || 500).json({
-        error: {
-            message: err.message || 'Internal server error'
-        }
-    });
+    res.status(err.status || 500).json({ error: 'Error interno del servidor' });
 });
 
 // 404

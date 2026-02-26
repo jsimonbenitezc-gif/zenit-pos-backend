@@ -84,10 +84,14 @@ const setupRelations = () => {
 // Agrega columnas nuevas de forma segura (si ya existen, no hace nada)
 const runMigrations = async () => {
     const migrations = [
-        `ALTER TABLE categories ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE`,
-        `ALTER TABLE customers ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE`,
+        `ALTER TABLE categories  ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE`,
+        `ALTER TABLE customers   ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE`,
+        `ALTER TABLE discounts   ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE`,
+        `ALTER TABLE combos      ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE`,
         `UPDATE categories SET active = TRUE WHERE active IS NULL`,
-        `UPDATE customers SET active = TRUE WHERE active IS NULL`
+        `UPDATE customers  SET active = TRUE WHERE active IS NULL`,
+        `UPDATE discounts  SET active = TRUE WHERE active IS NULL`,
+        `UPDATE combos     SET active = TRUE WHERE active IS NULL`
     ];
 
     for (const sql of migrations) {

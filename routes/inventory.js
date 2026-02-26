@@ -9,7 +9,7 @@ const {
     InventoryMovement,
     sequelize 
 } = require('../models');
-const { authenticate } = require('../middleware/auth');
+const { authenticate, isOwner } = require('../middleware/auth');
 
 // ============================================
 // INSUMOS (INGREDIENTS)
@@ -42,7 +42,7 @@ router.get('/ingredients/:id', authenticate, async (req, res) => {
 });
 
 // POST /api/inventory/ingredients - Crear insumo
-router.post('/ingredients', authenticate, async (req, res) => {
+router.post('/ingredients', authenticate, isOwner, async (req, res) => {
     try {
         const { name, unit, stock, min_stock, cost_per_unit, notes } = req.body;
 
@@ -66,7 +66,7 @@ router.post('/ingredients', authenticate, async (req, res) => {
 });
 
 // PUT /api/inventory/ingredients/:id - Actualizar insumo
-router.put('/ingredients/:id', authenticate, async (req, res) => {
+router.put('/ingredients/:id', authenticate, isOwner, async (req, res) => {
     try {
         const ingredient = await Ingredient.findByPk(req.params.id);
         if (!ingredient) {
@@ -92,7 +92,7 @@ router.put('/ingredients/:id', authenticate, async (req, res) => {
 });
 
 // DELETE /api/inventory/ingredients/:id - Eliminar insumo
-router.delete('/ingredients/:id', authenticate, async (req, res) => {
+router.delete('/ingredients/:id', authenticate, isOwner, async (req, res) => {
     try {
         const ingredient = await Ingredient.findByPk(req.params.id);
         if (!ingredient) {
@@ -157,7 +157,7 @@ router.get('/preparations/:id', authenticate, async (req, res) => {
 });
 
 // POST /api/inventory/preparations - Crear preparación
-router.post('/preparations', authenticate, async (req, res) => {
+router.post('/preparations', authenticate, isOwner, async (req, res) => {
     try {
         const { name, unit, yield_quantity, notes } = req.body;
 
@@ -179,7 +179,7 @@ router.post('/preparations', authenticate, async (req, res) => {
 });
 
 // PUT /api/inventory/preparations/:id - Actualizar preparación
-router.put('/preparations/:id', authenticate, async (req, res) => {
+router.put('/preparations/:id', authenticate, isOwner, async (req, res) => {
     try {
         const preparation = await Preparation.findByPk(req.params.id);
         if (!preparation) {
@@ -204,7 +204,7 @@ router.put('/preparations/:id', authenticate, async (req, res) => {
 });
 
 // DELETE /api/inventory/preparations/:id - Eliminar preparación
-router.delete('/preparations/:id', authenticate, async (req, res) => {
+router.delete('/preparations/:id', authenticate, isOwner, async (req, res) => {
     try {
         const preparation = await Preparation.findByPk(req.params.id);
         if (!preparation) {
@@ -223,7 +223,7 @@ router.delete('/preparations/:id', authenticate, async (req, res) => {
 // ============================================
 
 // POST /api/inventory/preparations/:id/recipe - Guardar receta de preparación
-router.post('/preparations/:id/recipe', authenticate, async (req, res) => {
+router.post('/preparations/:id/recipe', authenticate, isOwner, async (req, res) => {
     const t = await sequelize.transaction();
     
     try {
@@ -317,7 +317,7 @@ router.get('/products/:id/recipe', authenticate, async (req, res) => {
 });
 
 // POST /api/inventory/products/:id/recipe - Guardar receta de producto
-router.post('/products/:id/recipe', authenticate, async (req, res) => {
+router.post('/products/:id/recipe', authenticate, isOwner, async (req, res) => {
     const t = await sequelize.transaction();
     
     try {
