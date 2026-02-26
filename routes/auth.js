@@ -1,11 +1,21 @@
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
+const rateLimit = require('express-rate-limit');
 const { User } = require('../models');
 const { authenticate } = require('../middleware/auth');
 
+// Protección: máximo 10 intentos de login cada 15 minutos por IP
+const loginLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutos
+    max: 10,
+    message: { error: 'Demasiados intentos de inicio de sesión. Intenta de nuevo en 15 minutos.' },
+    standardHeaders: true,
+    legacyHeaders: false
+});
+
 // POST /api/auth/login
-router.post('/login', async (req, res) => {
+router.post('/login', loginLimiter, async (req, res) => {
     try {
         const { username, password } = req.body;
 
@@ -15,24 +25,24 @@ router.post('/login', async (req, res) => {
 
         // Buscar usuario
         const user = await User.findOne({ where: { username, active: true } });
-        
+
         if (!user) {
             return res.status(401).json({ error: 'Invalid credentials' });
         }
 
         // Verificar contraseña
         const validPassword = await user.comparePassword(password);
-        
+
         if (!validPassword) {
             return res.status(401).json({ error: 'Invalid credentials' });
         }
 
         // Crear token
         const token = jwt.sign(
-            { 
-                id: user.id, 
-                username: user.username, 
-                role: user.role 
+            {
+                id: user.id,
+                username: user.username,
+                role: user.role
             },
             process.env.JWT_SECRET,
             { expiresIn: '30d' }
@@ -49,7 +59,7 @@ router.post('/login', async (req, res) => {
         });
     } catch (error) {
         console.error('Login error:', error);
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -59,14 +69,15 @@ router.get('/me', authenticate, async (req, res) => {
         const user = await User.findByPk(req.user.id, {
             attributes: ['id', 'username', 'name', 'role', 'active']
         });
-        
+
         if (!user) {
             return res.status(404).json({ error: 'User not found' });
         }
 
         res.json(user);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        console.error('Error al obtener usuario:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -74,6 +85,10 @@ router.get('/me', authenticate, async (req, res) => {
 router.post('/change-password', authenticate, async (req, res) => {
     try {
         const { currentPassword, newPassword } = req.body;
+
+        if (!newPassword || newPassword.length < 6) {
+            return res.status(400).json({ error: 'La nueva contraseña debe tener al menos 6 caracteres' });
+        }
 
         const user = await User.findByPk(req.user.id);
         const validPassword = await user.comparePassword(currentPassword);
@@ -87,18 +102,9 @@ router.post('/change-password', authenticate, async (req, res) => {
 
         res.json({ message: 'Password changed successfully' });
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        console.error('Error al cambiar contraseña:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
 module.exports = router;
-
-// TEST ONLY - Eliminar en producción
-router.get('/test-token', async (req, res) => {
-    const token = jwt.sign(
-        { id: 1, username: 'admin', role: 'owner' },
-        process.env.JWT_SECRET,
-        { expiresIn: '30d' }
-    );
-    res.json({ token });
-});

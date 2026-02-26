@@ -24,7 +24,7 @@ router.get('/', authenticate, async (req, res) => {
 
         res.json(products);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -83,7 +83,7 @@ router.get('/grouped', authenticate, async (req, res) => {
 
         res.json(result);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -104,7 +104,7 @@ router.get('/:id', authenticate, async (req, res) => {
 
         res.json(product);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -129,7 +129,7 @@ router.post('/', authenticate, async (req, res) => {
 
         res.status(201).json(product);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -157,7 +157,7 @@ router.put('/:id', authenticate, async (req, res) => {
 
         res.json(product);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -175,7 +175,7 @@ router.delete('/:id', authenticate, isOwner, async (req, res) => {
 
         res.json({ message: 'Product deleted successfully' });
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 

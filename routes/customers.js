@@ -8,11 +8,13 @@ const { Op } = require('sequelize');
 router.get('/', authenticate, async (req, res) => {
     try {
         const customers = await Customer.findAll({
+            where: { active: true },
             order: [['name', 'ASC']]
         });
         res.json(customers);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        console.error('Error al obtener clientes:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -20,6 +22,7 @@ router.get('/', authenticate, async (req, res) => {
 router.get('/with-stats', authenticate, async (req, res) => {
     try {
         const customers = await Customer.findAll({
+            where: { active: true },
             include: [{
                 model: Order,
                 as: 'orders',
@@ -41,15 +44,16 @@ router.get('/with-stats', authenticate, async (req, res) => {
 
         res.json(customers);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        console.error('Error al obtener clientes con stats:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
 // GET /api/customers/stats - Estadísticas de clientes
 router.get('/stats', authenticate, async (req, res) => {
     try {
-        // Total de clientes
-        const totalClientes = await Customer.count();
+        // Total de clientes activos
+        const totalClientes = await Customer.count({ where: { active: true } });
 
         // Clientes nuevos este mes
         const primerDiaMes = new Date();
@@ -58,12 +62,14 @@ router.get('/stats', authenticate, async (req, res) => {
 
         const clientesNuevos = await Customer.count({
             where: {
+                active: true,
                 createdAt: { [Op.gte]: primerDiaMes }
             }
         });
 
         // Clientes frecuentes (2+ compras este mes)
         const clientesFrecuentes = await Customer.count({
+            where: { active: true },
             include: [{
                 model: Order,
                 as: 'orders',
@@ -81,6 +87,7 @@ router.get('/stats', authenticate, async (req, res) => {
 
         // Top 3 clientes del mes
         const topClientesMes = await Customer.findAll({
+            where: { active: true },
             include: [{
                 model: Order,
                 as: 'orders',
@@ -109,14 +116,16 @@ router.get('/stats', authenticate, async (req, res) => {
             topClientesMes
         });
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        console.error('Error al obtener stats de clientes:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
 // GET /api/customers/:id - Obtener un cliente
 router.get('/:id', authenticate, async (req, res) => {
     try {
-        const customer = await Customer.findByPk(req.params.id, {
+        const customer = await Customer.findOne({
+            where: { id: req.params.id, active: true },
             include: [{
                 model: Order,
                 as: 'orders',
@@ -131,7 +140,8 @@ router.get('/:id', authenticate, async (req, res) => {
 
         res.json(customer);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        console.error('Error al obtener cliente:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -153,7 +163,8 @@ router.post('/', authenticate, async (req, res) => {
         const customer = await Customer.create({ phone, name, address, notes });
         res.status(201).json(customer);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        console.error('Error al crear cliente:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -179,23 +190,27 @@ router.put('/:id', authenticate, async (req, res) => {
         await customer.update({ phone, name, address, notes });
         res.json(customer);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        console.error('Error al actualizar cliente:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
-// DELETE /api/customers/:id - Eliminar cliente
+// DELETE /api/customers/:id - Soft delete (oculta el cliente, no lo borra)
 router.delete('/:id', authenticate, async (req, res) => {
     try {
-        const customer = await Customer.findByPk(req.params.id);
+        const customer = await Customer.findOne({
+            where: { id: req.params.id, active: true }
+        });
 
         if (!customer) {
             return res.status(404).json({ error: 'Customer not found' });
         }
 
-        await customer.destroy();
+        await customer.update({ active: false });
         res.json({ message: 'Customer deleted successfully' });
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        console.error('Error al eliminar cliente:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 

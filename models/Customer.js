@@ -23,6 +23,10 @@ const Customer = sequelize.define('Customer', {
     notes: {
         type: DataTypes.TEXT,
         allowNull: true
+    },
+    active: {
+        type: DataTypes.BOOLEAN,
+        defaultValue: true
     }
 }, {
     tableName: 'customers',

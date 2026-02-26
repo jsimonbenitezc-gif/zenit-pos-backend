@@ -18,6 +18,10 @@ const Category = sequelize.define('Category', {
     image: {
         type: DataTypes.STRING,
         allowNull: true
+    },
+    active: {
+        type: DataTypes.BOOLEAN,
+        defaultValue: true
     }
 }, {
     tableName: 'categories',

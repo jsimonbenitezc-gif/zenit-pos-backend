@@ -24,7 +24,7 @@ router.get('/ingredients', authenticate, async (req, res) => {
         });
         res.json(ingredients);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -37,7 +37,7 @@ router.get('/ingredients/:id', authenticate, async (req, res) => {
         }
         res.json(ingredient);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -61,7 +61,7 @@ router.post('/ingredients', authenticate, async (req, res) => {
 
         res.status(201).json(ingredient);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -87,7 +87,7 @@ router.put('/ingredients/:id', authenticate, async (req, res) => {
 
         res.json(ingredient);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -102,7 +102,7 @@ router.delete('/ingredients/:id', authenticate, async (req, res) => {
         await ingredient.update({ active: false });
         res.json({ message: 'Ingredient deleted successfully' });
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -128,7 +128,7 @@ router.get('/preparations', authenticate, async (req, res) => {
         });
         res.json(preparations);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -152,7 +152,7 @@ router.get('/preparations/:id', authenticate, async (req, res) => {
 
         res.json(preparation);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -174,7 +174,7 @@ router.post('/preparations', authenticate, async (req, res) => {
 
         res.status(201).json(preparation);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -199,7 +199,7 @@ router.put('/preparations/:id', authenticate, async (req, res) => {
 
         res.json(preparation);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -214,7 +214,7 @@ router.delete('/preparations/:id', authenticate, async (req, res) => {
         await preparation.update({ active: false });
         res.json({ message: 'Preparation deleted successfully' });
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -278,7 +278,7 @@ router.post('/preparations/:id/recipe', authenticate, async (req, res) => {
         res.json(updatedPreparation);
     } catch (error) {
         await t.rollback();
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -312,7 +312,7 @@ router.get('/products/:id/recipe', authenticate, async (req, res) => {
 
         res.json(enrichedRecipe);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -354,7 +354,7 @@ router.post('/products/:id/recipe', authenticate, async (req, res) => {
         res.json(recipe);
     } catch (error) {
         await t.rollback();
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -386,7 +386,7 @@ router.get('/movements', authenticate, async (req, res) => {
 
         res.json(movements);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -457,7 +457,7 @@ router.post('/movements', authenticate, async (req, res) => {
         res.status(201).json(fullMovement);
     } catch (error) {
         await t.rollback();
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 

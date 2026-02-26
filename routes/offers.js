@@ -22,7 +22,7 @@ router.get('/discounts', authenticate, async (req, res) => {
 
         res.json(discounts);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -49,7 +49,7 @@ router.get('/discounts/active', authenticate, async (req, res) => {
 
         res.json(discounts);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -64,7 +64,7 @@ router.get('/discounts/:id', authenticate, async (req, res) => {
 
         res.json(discount);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -103,7 +103,7 @@ router.post('/discounts', authenticate, async (req, res) => {
 
         res.status(201).json(discount);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -131,7 +131,7 @@ router.put('/discounts/:id', authenticate, async (req, res) => {
 
         res.json(discount);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -147,7 +147,7 @@ router.delete('/discounts/:id', authenticate, async (req, res) => {
         await discount.destroy();
         res.json({ message: 'Discount deleted successfully' });
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -257,7 +257,7 @@ router.post('/discounts/calculate', authenticate, async (req, res) => {
             final_amount: finalAmount
         });
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -289,7 +289,7 @@ router.get('/combos', authenticate, async (req, res) => {
 
         res.json(combos);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -313,7 +313,7 @@ router.get('/combos/:id', authenticate, async (req, res) => {
 
         res.json(combo);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -337,7 +337,7 @@ router.post('/combos', authenticate, async (req, res) => {
 
         res.status(201).json(combo);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -364,7 +364,7 @@ router.put('/combos/:id', authenticate, async (req, res) => {
 
         res.json(combo);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -380,7 +380,7 @@ router.delete('/combos/:id', authenticate, async (req, res) => {
         await combo.destroy();
         res.json({ message: 'Combo deleted successfully' });
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -443,7 +443,7 @@ router.post('/combos/:id/items', authenticate, async (req, res) => {
         res.json(updatedCombo);
     } catch (error) {
         await t.rollback();
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 

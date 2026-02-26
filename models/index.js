@@ -81,23 +81,54 @@ const setupRelations = () => {
     models.ComboItem.belongsTo(models.Product, { foreignKey: 'product_id', as: 'product' });
 };
 
+// Agrega columnas nuevas de forma segura (si ya existen, no hace nada)
+const runMigrations = async () => {
+    const migrations = [
+        `ALTER TABLE categories ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE`,
+        `ALTER TABLE customers ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE`,
+        `UPDATE categories SET active = TRUE WHERE active IS NULL`,
+        `UPDATE customers SET active = TRUE WHERE active IS NULL`
+    ];
+
+    for (const sql of migrations) {
+        try {
+            await sequelize.query(sql);
+        } catch (err) {
+            if (!err.message.includes('already exists')) {
+                console.error('❌ Migration error:', err.message);
+            }
+        }
+    }
+    console.log('✅ Migrations applied');
+};
+
 // Sincronizar base de datos
 const syncDatabase = async () => {
     try {
         setupRelations();
-        await sequelize.sync({ alter: true });
+
+        // Crea las tablas si no existen. No modifica tablas existentes (seguro en producción).
+        await sequelize.sync();
         console.log('✅ Database synced successfully');
-        
+
+        // Migraciones: agrega columnas nuevas solo si no existen
+        await runMigrations();
+
         // Crear usuario admin por defecto si no existe
         const adminExists = await models.User.findOne({ where: { username: 'admin' } });
         if (!adminExists) {
-            await models.User.create({
-                username: 'admin',
-                password: 'admin123',
-                name: 'Administrador',
-                role: 'owner'
-            });
-            console.log('✅ Default admin user created (username: admin, password: admin123)');
+            const initialPassword = process.env.INITIAL_ADMIN_PASSWORD;
+            if (!initialPassword) {
+                console.error('❌ INITIAL_ADMIN_PASSWORD no está definida en .env — no se creó el usuario admin.');
+            } else {
+                await models.User.create({
+                    username: 'admin',
+                    password: initialPassword,
+                    name: 'Administrador',
+                    role: 'owner'
+                });
+                console.log('✅ Usuario admin creado. Cambia la contraseña después del primer login.');
+            }
         }
     } catch (error) {
         console.error('❌ Error syncing database:', error);

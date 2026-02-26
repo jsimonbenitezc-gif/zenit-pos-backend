@@ -42,7 +42,7 @@ router.get('/', authenticate, async (req, res) => {
 
         res.json(orders);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -74,7 +74,7 @@ router.get('/:id', authenticate, async (req, res) => {
 
         res.json(order);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -175,7 +175,7 @@ router.post('/', authenticate, async (req, res) => {
     } catch (error) {
         await t.rollback();
         console.error('Create order error:', error);
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -198,7 +198,7 @@ router.put('/:id/status', authenticate, async (req, res) => {
 
         res.json(order);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -233,7 +233,7 @@ router.put('/:id', authenticate, async (req, res) => {
 
         res.json(order);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -271,7 +271,7 @@ router.delete('/:id', authenticate, async (req, res) => {
         res.json({ message: 'Order cancelled successfully' });
     } catch (error) {
         await t.rollback();
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 

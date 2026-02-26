@@ -202,7 +202,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
         });
     } catch (error) {
         console.error('Dashboard stats error:', error);
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -248,7 +248,7 @@ router.get('/sales', authenticate, async (req, res) => {
 
         res.json(sales);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
@@ -292,7 +292,7 @@ router.get('/products', authenticate, async (req, res) => {
 
         res.json(productStats);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 

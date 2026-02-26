@@ -6,8 +6,22 @@ const { syncDatabase } = require('./models');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
-app.use(cors());
+// Orígenes permitidos para conectarse al API
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
+    .split(',')
+    .map(o => o.trim())
+    .filter(Boolean);
+
+app.use(cors({
+    origin: (origin, callback) => {
+        // Permitir requests sin origen (apps de escritorio, mobile, Postman, etc.)
+        if (!origin) return callback(null, true);
+        // Permitir si el origen está en la lista
+        if (allowedOrigins.includes(origin)) return callback(null, true);
+        callback(new Error('Origen no permitido por CORS'));
+    },
+    credentials: true
+}));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -51,18 +65,12 @@ app.use((req, res) => {
     res.status(404).json({ error: 'Endpoint not found' });
 });
 
-// Sync database before starting
+// Sync database and start server
 syncDatabase().then(() => {
     app.listen(PORT, () => {
-        console.log(`🚀 Zenit POS API running on http://localhost:3000`);
+        console.log(`🚀 Zenit POS API running on http://localhost:${PORT}`);
         console.log(`📝 Environment: ${process.env.NODE_ENV}`);
     });
-});
-
-// Start server
-app.listen(PORT, () => {
-    console.log(`🚀 Zenit POS API running on http://localhost:${PORT}`);
-    console.log(`📝 Environment: ${process.env.NODE_ENV}`);
 });
 
 module.exports = app;
