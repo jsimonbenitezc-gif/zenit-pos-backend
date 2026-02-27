@@ -6,6 +6,9 @@ const { syncDatabase } = require('./models');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Confiar en el proxy de Render.com (necesario para que el rate limiter funcione correctamente)
+app.set('trust proxy', 1);
+
 // Orígenes permitidos para conectarse al API
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
     .split(',')
