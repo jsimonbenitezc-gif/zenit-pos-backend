@@ -125,14 +125,6 @@ router.post('/', authenticate, async (req, res) => {
                 return res.status(404).json({ error: `Product ${item.product_id || item.id} not found` });
             }
 
-            // Verificar stock suficiente
-            if (product.stock < item.quantity) {
-                await t.rollback();
-                return res.status(400).json({ 
-                    error: `Insufficient stock for ${product.name}. Available: ${product.stock}, Requested: ${item.quantity}` 
-                });
-            }
-
             // Crear el item
             await OrderItem.create({
                 order_id: order.id,
