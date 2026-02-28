@@ -147,10 +147,9 @@ router.get('/dashboard', authenticate, async (req, res) => {
             }],
             attributes: ['id', 'name', 'phone'],
             where: sequelize.literal(`(
-                SELECT COUNT(*) FROM orders 
-                WHERE orders.customer_id = Customer.id
-            ) >= 3`),
-            raw: true
+                SELECT COUNT(*) FROM orders
+                WHERE orders.customer_id = "customers"."id"
+            ) >= 3`)
         });
 
         // 10. VENTAS POR HORA HOY (para gráfica de 24h)
@@ -197,7 +196,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
                 total_vendido: parseInt(p.total_vendido)
             })),
             ultimasVentas: ultimasVentasFormateadas,
-            clientesVIPHoy,
+            clientesVIPHoy: clientesVIPHoy.map(c => ({ id: c.id, name: c.name, phone: c.phone })),
             ventasPorHora
         });
     } catch (error) {
