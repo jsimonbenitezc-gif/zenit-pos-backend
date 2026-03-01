@@ -50,6 +50,10 @@ const Order = sequelize.define('Order', {
     customer_temp_info: {
         type: DataTypes.STRING,
         allowNull: true
+    },
+    business_id: {
+        type: DataTypes.INTEGER,
+        allowNull: true
     }
 }, {
     tableName: 'orders',

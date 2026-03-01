@@ -35,6 +35,10 @@ const Ingredient = sequelize.define('Ingredient', {
     active: {
         type: DataTypes.BOOLEAN,
         defaultValue: true
+    },
+    business_id: {
+        type: DataTypes.INTEGER,
+        allowNull: true
     }
 }, {
     tableName: 'ingredients',

@@ -36,6 +36,10 @@ const Combo = sequelize.define('Combo', {
     active: {
         type: DataTypes.BOOLEAN,
         defaultValue: true
+    },
+    business_id: {
+        type: DataTypes.INTEGER,
+        allowNull: true
     }
 }, {
     tableName: 'combos',

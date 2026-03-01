@@ -4,11 +4,12 @@ const { Customer, Order, sequelize } = require('../models');
 const { authenticate, isOwner } = require('../middleware/auth');
 const { Op } = require('sequelize');
 
-// GET /api/customers - Obtener todos los clientes
+// GET /api/customers
 router.get('/', authenticate, async (req, res) => {
     try {
+        const biz = req.user.business_id;
         const customers = await Customer.findAll({
-            where: { active: true },
+            where: { active: true, business_id: biz },
             order: [['name', 'ASC']]
         });
         res.json(customers);
@@ -18,30 +19,27 @@ router.get('/', authenticate, async (req, res) => {
     }
 });
 
-// GET /api/customers/with-stats - Clientes con estadísticas de compras
+// GET /api/customers/with-stats
 router.get('/with-stats', authenticate, async (req, res) => {
     try {
+        const biz = req.user.business_id;
         const customers = await Customer.findAll({
-            where: { active: true },
+            where: { active: true, business_id: biz },
             include: [{
                 model: Order,
                 as: 'orders',
-                attributes: []
+                where: { business_id: biz },
+                attributes: [],
+                required: false
             }],
             attributes: [
-                'id',
-                'phone',
-                'name',
-                'address',
-                'notes',
-                'createdAt',
+                'id', 'phone', 'name', 'address', 'notes', 'createdAt',
                 [sequelize.fn('COUNT', sequelize.col('orders.id')), 'total_compras'],
                 [sequelize.fn('COALESCE', sequelize.fn('SUM', sequelize.col('orders.total')), 0), 'monto_total']
             ],
             group: ['Customer.id'],
             order: [[sequelize.literal('total_compras'), 'DESC']]
         });
-
         res.json(customers);
     } catch (error) {
         console.error('Error al obtener clientes con stats:', error);
@@ -49,33 +47,26 @@ router.get('/with-stats', authenticate, async (req, res) => {
     }
 });
 
-// GET /api/customers/stats - Estadísticas de clientes
+// GET /api/customers/stats
 router.get('/stats', authenticate, async (req, res) => {
     try {
-        // Total de clientes activos
-        const totalClientes = await Customer.count({ where: { active: true } });
+        const biz = req.user.business_id;
+        const totalClientes = await Customer.count({ where: { active: true, business_id: biz } });
 
-        // Clientes nuevos este mes
         const primerDiaMes = new Date();
         primerDiaMes.setDate(1);
         primerDiaMes.setHours(0, 0, 0, 0);
 
         const clientesNuevos = await Customer.count({
-            where: {
-                active: true,
-                createdAt: { [Op.gte]: primerDiaMes }
-            }
+            where: { active: true, business_id: biz, createdAt: { [Op.gte]: primerDiaMes } }
         });
 
-        // Clientes frecuentes (2+ compras este mes)
         const clientesFrecuentes = await Customer.count({
-            where: { active: true },
+            where: { active: true, business_id: biz },
             include: [{
                 model: Order,
                 as: 'orders',
-                where: {
-                    createdAt: { [Op.gte]: primerDiaMes }
-                },
+                where: { createdAt: { [Op.gte]: primerDiaMes }, business_id: biz },
                 attributes: []
             }],
             group: ['Customer.id'],
@@ -85,21 +76,16 @@ router.get('/stats', authenticate, async (req, res) => {
             )
         });
 
-        // Top 3 clientes del mes
         const topClientesMes = await Customer.findAll({
-            where: { active: true },
+            where: { active: true, business_id: biz },
             include: [{
                 model: Order,
                 as: 'orders',
-                where: {
-                    createdAt: { [Op.gte]: primerDiaMes }
-                },
+                where: { createdAt: { [Op.gte]: primerDiaMes }, business_id: biz },
                 attributes: []
             }],
             attributes: [
-                'id',
-                'name',
-                'phone',
+                'id', 'name', 'phone',
                 [sequelize.fn('COUNT', sequelize.col('orders.id')), 'total_pedidos'],
                 [sequelize.fn('SUM', sequelize.col('orders.total')), 'monto_total']
             ],
@@ -109,35 +95,31 @@ router.get('/stats', authenticate, async (req, res) => {
             raw: true
         });
 
-        res.json({
-            totalClientes,
-            clientesNuevos,
-            clientesFrecuentes: clientesFrecuentes.length || 0,
-            topClientesMes
-        });
+        res.json({ totalClientes, clientesNuevos, clientesFrecuentes: clientesFrecuentes.length || 0, topClientesMes });
     } catch (error) {
         console.error('Error al obtener stats de clientes:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
-// GET /api/customers/:id - Obtener un cliente
+// GET /api/customers/:id
 router.get('/:id', authenticate, async (req, res) => {
     try {
+        const biz = req.user.business_id;
         const customer = await Customer.findOne({
-            where: { id: req.params.id, active: true },
+            where: { id: req.params.id, active: true, business_id: biz },
             include: [{
                 model: Order,
                 as: 'orders',
+                where: { business_id: biz },
+                required: false,
                 limit: 10,
                 order: [['createdAt', 'DESC']]
             }]
         });
-
         if (!customer) {
             return res.status(404).json({ error: 'Customer not found' });
         }
-
         res.json(customer);
     } catch (error) {
         console.error('Error al obtener cliente:', error);
@@ -145,22 +127,20 @@ router.get('/:id', authenticate, async (req, res) => {
     }
 });
 
-// POST /api/customers - Crear cliente
+// POST /api/customers
 router.post('/', authenticate, async (req, res) => {
     try {
+        const biz = req.user.business_id;
         const { phone, name, address, notes } = req.body;
-
         if (!phone || !name) {
             return res.status(400).json({ error: 'Phone and name are required' });
         }
-
-        // Verificar si ya existe
-        const exists = await Customer.findOne({ where: { phone } });
+        // Verificar si ya existe en este negocio
+        const exists = await Customer.findOne({ where: { phone, business_id: biz } });
         if (exists) {
             return res.status(400).json({ error: 'Customer with this phone already exists' });
         }
-
-        const customer = await Customer.create({ phone, name, address, notes });
+        const customer = await Customer.create({ phone, name, address, notes, business_id: biz });
         res.status(201).json(customer);
     } catch (error) {
         console.error('Error al crear cliente:', error);
@@ -168,25 +148,23 @@ router.post('/', authenticate, async (req, res) => {
     }
 });
 
-// PUT /api/customers/:id - Actualizar cliente
+// PUT /api/customers/:id
 router.put('/:id', authenticate, async (req, res) => {
     try {
-        const customer = await Customer.findByPk(req.params.id);
-
+        const biz = req.user.business_id;
+        const customer = await Customer.findOne({
+            where: { id: req.params.id, business_id: biz }
+        });
         if (!customer) {
             return res.status(404).json({ error: 'Customer not found' });
         }
-
         const { phone, name, address, notes } = req.body;
-
-        // Si cambia el teléfono, verificar que no exista
         if (phone && phone !== customer.phone) {
-            const exists = await Customer.findOne({ where: { phone } });
+            const exists = await Customer.findOne({ where: { phone, business_id: biz } });
             if (exists) {
                 return res.status(400).json({ error: 'Customer with this phone already exists' });
             }
         }
-
         await customer.update({ phone, name, address, notes });
         res.json(customer);
     } catch (error) {
@@ -195,17 +173,16 @@ router.put('/:id', authenticate, async (req, res) => {
     }
 });
 
-// DELETE /api/customers/:id - Soft delete (oculta el cliente, no lo borra)
+// DELETE /api/customers/:id
 router.delete('/:id', authenticate, isOwner, async (req, res) => {
     try {
+        const biz = req.user.business_id;
         const customer = await Customer.findOne({
-            where: { id: req.params.id, active: true }
+            where: { id: req.params.id, active: true, business_id: biz }
         });
-
         if (!customer) {
             return res.status(404).json({ error: 'Customer not found' });
         }
-
         await customer.update({ active: false });
         res.json({ message: 'Customer deleted successfully' });
     } catch (error) {

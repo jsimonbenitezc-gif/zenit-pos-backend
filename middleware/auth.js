@@ -9,7 +9,8 @@ const authenticate = (req, res, next) => {
         }
 
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        req.user = decoded; // Guardar info del usuario en la request
+        req.user = decoded;
+        req.user.business_id = decoded.business_id || decoded.id; // owners: business_id = su propio id
         next();
     } catch (error) {
         return res.status(401).json({ error: 'Invalid token' });

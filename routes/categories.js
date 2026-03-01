@@ -6,8 +6,9 @@ const { authenticate, isOwner } = require('../middleware/auth');
 // GET /api/categories
 router.get('/', authenticate, async (req, res) => {
     try {
+        const biz = req.user.business_id;
         const categories = await Category.findAll({
-            where: { active: true },
+            where: { active: true, business_id: biz },
             order: [['name', 'ASC']]
         });
         res.json(categories);
@@ -20,14 +21,13 @@ router.get('/', authenticate, async (req, res) => {
 // GET /api/categories/:id
 router.get('/:id', authenticate, async (req, res) => {
     try {
+        const biz = req.user.business_id;
         const category = await Category.findOne({
-            where: { id: req.params.id, active: true }
+            where: { id: req.params.id, active: true, business_id: biz }
         });
-
         if (!category) {
             return res.status(404).json({ error: 'Category not found' });
         }
-
         res.json(category);
     } catch (error) {
         console.error('Error al obtener categoría:', error);
@@ -38,13 +38,12 @@ router.get('/:id', authenticate, async (req, res) => {
 // POST /api/categories
 router.post('/', authenticate, isOwner, async (req, res) => {
     try {
+        const biz = req.user.business_id;
         const { name, emoji, image } = req.body;
-
         if (!name) {
             return res.status(400).json({ error: 'Name is required' });
         }
-
-        const category = await Category.create({ name, emoji, image });
+        const category = await Category.create({ name, emoji, image, business_id: biz });
         res.status(201).json(category);
     } catch (error) {
         console.error('Error al crear categoría:', error);
@@ -55,17 +54,15 @@ router.post('/', authenticate, isOwner, async (req, res) => {
 // PUT /api/categories/:id
 router.put('/:id', authenticate, isOwner, async (req, res) => {
     try {
+        const biz = req.user.business_id;
         const category = await Category.findOne({
-            where: { id: req.params.id, active: true }
+            where: { id: req.params.id, active: true, business_id: biz }
         });
-
         if (!category) {
             return res.status(404).json({ error: 'Category not found' });
         }
-
         const { name, emoji, image } = req.body;
         await category.update({ name, emoji, image });
-
         res.json(category);
     } catch (error) {
         console.error('Error al actualizar categoría:', error);
@@ -73,17 +70,16 @@ router.put('/:id', authenticate, isOwner, async (req, res) => {
     }
 });
 
-// DELETE /api/categories/:id - Soft delete (oculta la categoría, no la borra)
+// DELETE /api/categories/:id
 router.delete('/:id', authenticate, isOwner, async (req, res) => {
     try {
+        const biz = req.user.business_id;
         const category = await Category.findOne({
-            where: { id: req.params.id, active: true }
+            where: { id: req.params.id, active: true, business_id: biz }
         });
-
         if (!category) {
             return res.status(404).json({ error: 'Category not found' });
         }
-
         await category.update({ active: false });
         res.json({ message: 'Category deleted successfully' });
     } catch (error) {

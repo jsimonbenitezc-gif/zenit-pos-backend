@@ -4,12 +4,13 @@ const { Order, OrderItem, Product, Customer, sequelize } = require('../models');
 const { authenticate } = require('../middleware/auth');
 const { Op } = require('sequelize');
 
-// GET /api/orders - Obtener todos los pedidos
+// GET /api/orders
 router.get('/', authenticate, async (req, res) => {
     try {
+        const biz = req.user.business_id;
         const { status, order_type, date_from, date_to, limit } = req.query;
-        
-        const where = {};
+
+        const where = { business_id: biz };
         if (status) where.status = status;
         if (order_type) where.order_type = order_type;
         if (date_from || date_to) {
@@ -46,10 +47,12 @@ router.get('/', authenticate, async (req, res) => {
     }
 });
 
-// GET /api/orders/:id - Obtener detalles de un pedido
+// GET /api/orders/:id
 router.get('/:id', authenticate, async (req, res) => {
     try {
-        const order = await Order.findByPk(req.params.id, {
+        const biz = req.user.business_id;
+        const order = await Order.findOne({
+            where: { id: req.params.id, business_id: biz },
             include: [
                 {
                     model: Customer,
@@ -78,31 +81,23 @@ router.get('/:id', authenticate, async (req, res) => {
     }
 });
 
-// POST /api/orders - Crear nuevo pedido
+// POST /api/orders
 router.post('/', authenticate, async (req, res) => {
     const t = await sequelize.transaction();
-    
+
     try {
+        const biz = req.user.business_id;
         const {
-            customer_id,
-            customer_temp_info,
-            items,
-            total,
-            payment_method,
-            order_type,
-            reference,
-            delivery_address,
-            maps_link,
-            notes
+            customer_id, customer_temp_info, items, total,
+            payment_method, order_type, reference,
+            delivery_address, maps_link, notes
         } = req.body;
 
-        // Validar que haya items
         if (!items || items.length === 0) {
             await t.rollback();
             return res.status(400).json({ error: 'Order must have at least one item' });
         }
 
-        // Crear el pedido
         const order = await Order.create({
             customer_id,
             customer_temp_info,
@@ -113,19 +108,18 @@ router.post('/', authenticate, async (req, res) => {
             reference,
             delivery_address,
             maps_link,
-            notes
+            notes,
+            business_id: biz
         }, { transaction: t });
 
-        // Crear los items del pedido y actualizar stock
         for (const item of items) {
             const product = await Product.findByPk(item.product_id || item.id, { transaction: t });
-            
+
             if (!product) {
                 await t.rollback();
                 return res.status(404).json({ error: `Product ${item.product_id || item.id} not found` });
             }
 
-            // Crear el item
             await OrderItem.create({
                 order_id: order.id,
                 product_id: product.id,
@@ -135,7 +129,6 @@ router.post('/', authenticate, async (req, res) => {
                 notes: item.notes || item.nota || ''
             }, { transaction: t });
 
-            // Actualizar stock
             await product.update({
                 stock: product.stock - (item.quantity || 1)
             }, { transaction: t });
@@ -143,22 +136,13 @@ router.post('/', authenticate, async (req, res) => {
 
         await t.commit();
 
-        // Obtener el pedido completo con sus relaciones
         const fullOrder = await Order.findByPk(order.id, {
             include: [
-                {
-                    model: Customer,
-                    as: 'customer',
-                    attributes: ['id', 'name', 'phone']
-                },
+                { model: Customer, as: 'customer', attributes: ['id', 'name', 'phone'] },
                 {
                     model: OrderItem,
                     as: 'items',
-                    include: [{
-                        model: Product,
-                        as: 'product',
-                        attributes: ['id', 'name', 'emoji', 'image']
-                    }]
+                    include: [{ model: Product, as: 'product', attributes: ['id', 'name', 'emoji', 'image'] }]
                 }
             ]
         });
@@ -171,94 +155,69 @@ router.post('/', authenticate, async (req, res) => {
     }
 });
 
-// PUT /api/orders/:id/status - Actualizar estado del pedido
+// PUT /api/orders/:id/status
 router.put('/:id/status', authenticate, async (req, res) => {
     try {
+        const biz = req.user.business_id;
         const { status } = req.body;
 
         if (!['registrado', 'completado', 'entregado', 'cancelado'].includes(status)) {
             return res.status(400).json({ error: 'Invalid status' });
         }
 
-        const order = await Order.findByPk(req.params.id);
-
+        const order = await Order.findOne({ where: { id: req.params.id, business_id: biz } });
         if (!order) {
             return res.status(404).json({ error: 'Order not found' });
         }
 
         await order.update({ status });
-
         res.json(order);
     } catch (error) {
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
-// PUT /api/orders/:id - Actualizar pedido completo
+// PUT /api/orders/:id
 router.put('/:id', authenticate, async (req, res) => {
     try {
-        const order = await Order.findByPk(req.params.id);
-
+        const biz = req.user.business_id;
+        const order = await Order.findOne({ where: { id: req.params.id, business_id: biz } });
         if (!order) {
             return res.status(404).json({ error: 'Order not found' });
         }
-
-        const {
-            status,
-            payment_method,
-            order_type,
-            reference,
-            delivery_address,
-            maps_link,
-            notes
-        } = req.body;
-
-        await order.update({
-            status,
-            payment_method,
-            order_type,
-            reference,
-            delivery_address,
-            maps_link,
-            notes
-        });
-
+        const { status, payment_method, order_type, reference, delivery_address, maps_link, notes } = req.body;
+        await order.update({ status, payment_method, order_type, reference, delivery_address, maps_link, notes });
         res.json(order);
     } catch (error) {
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
-// DELETE /api/orders/:id - Cancelar pedido
+// DELETE /api/orders/:id
 router.delete('/:id', authenticate, async (req, res) => {
     const t = await sequelize.transaction();
-    
+
     try {
-        const order = await Order.findByPk(req.params.id, {
-            include: [{
-                model: OrderItem,
-                as: 'items'
-            }]
-        }, { transaction: t });
+        const biz = req.user.business_id;
+        const order = await Order.findOne({
+            where: { id: req.params.id, business_id: biz },
+            include: [{ model: OrderItem, as: 'items' }],
+            transaction: t
+        });
 
         if (!order) {
             await t.rollback();
             return res.status(404).json({ error: 'Order not found' });
         }
 
-        // Restaurar stock de los productos
         for (const item of order.items) {
             const product = await Product.findByPk(item.product_id, { transaction: t });
             if (product) {
-                await product.update({
-                    stock: product.stock + item.quantity
-                }, { transaction: t });
+                await product.update({ stock: product.stock + item.quantity }, { transaction: t });
             }
         }
 
-        // Marcar como cancelado en lugar de eliminar
         await order.update({ status: 'cancelado' }, { transaction: t });
-
         await t.commit();
         res.json({ message: 'Order cancelled successfully' });
     } catch (error) {

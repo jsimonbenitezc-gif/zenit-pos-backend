@@ -7,9 +7,11 @@ const { Op } = require('sequelize');
 // GET /api/stats/dashboard - Estadísticas completas del dashboard
 router.get('/dashboard', authenticate, async (req, res) => {
     try {
+        const biz = req.user.business_id;
+
         const hoy = new Date();
         hoy.setHours(0, 0, 0, 0);
-        
+
         const ayer = new Date(hoy);
         ayer.setDate(ayer.getDate() - 1);
 
@@ -21,6 +23,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
         // 1. VENTAS DE HOY
         const ventasHoy = await Order.findAll({
             where: {
+                business_id: biz,
                 createdAt: { [Op.gte]: hoy }
             },
             attributes: [
@@ -34,6 +37,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
         // 2. VENTAS DE AYER
         const ventasAyer = await Order.findAll({
             where: {
+                business_id: biz,
                 createdAt: {
                     [Op.gte]: ayer,
                     [Op.lt]: hoy
@@ -49,6 +53,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
         // 3. VENTAS ÚLTIMOS 7 DÍAS (para gráfica)
         const ultimos7Dias = await Order.findAll({
             where: {
+                business_id: biz,
                 createdAt: { [Op.gte]: hace7Dias }
             },
             attributes: [
@@ -67,6 +72,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
                 model: Order,
                 as: 'order',
                 where: {
+                    business_id: biz,
                     createdAt: { [Op.gte]: hoy }
                 },
                 attributes: []
@@ -80,6 +86,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
         // 5. PRODUCTOS CON STOCK BAJO (menos de 10)
         const productosStockBajo = await Product.count({
             where: {
+                business_id: biz,
                 stock: { [Op.lt]: 10 },
                 active: true
             }
@@ -88,6 +95,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
         // 6. CLIENTES ÚNICOS HOY
         const clientesHoy = await Order.count({
             where: {
+                business_id: biz,
                 createdAt: { [Op.gte]: hoy },
                 customer_id: { [Op.ne]: null }
             },
@@ -102,6 +110,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
                     model: Order,
                     as: 'order',
                     where: {
+                        business_id: biz,
                         createdAt: { [Op.gte]: hace7Dias }
                     },
                     attributes: []
@@ -125,6 +134,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
 
         // 8. ÚLTIMAS 5 VENTAS
         const ultimasVentas = await Order.findAll({
+            where: { business_id: biz },
             include: [{
                 model: Customer,
                 as: 'customer',
@@ -141,6 +151,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
                 model: Order,
                 as: 'orders',
                 where: {
+                    business_id: biz,
                     createdAt: { [Op.gte]: hoy }
                 },
                 attributes: []
@@ -149,12 +160,14 @@ router.get('/dashboard', authenticate, async (req, res) => {
             where: sequelize.literal(`(
                 SELECT COUNT(*) FROM orders
                 WHERE orders.customer_id = "customers"."id"
+                AND orders.business_id = ${biz}
             ) >= 3`)
         });
 
         // 10. VENTAS POR HORA HOY (para gráfica de 24h)
         const ventasPorHora = await Order.findAll({
             where: {
+                business_id: biz,
                 createdAt: { [Op.gte]: hoy }
             },
             attributes: [
@@ -208,9 +221,10 @@ router.get('/dashboard', authenticate, async (req, res) => {
 // GET /api/stats/sales - Estadísticas de ventas por periodo
 router.get('/sales', authenticate, async (req, res) => {
     try {
+        const biz = req.user.business_id;
         const { date_from, date_to, group_by } = req.query;
 
-        const where = {};
+        const where = { business_id: biz };
         if (date_from || date_to) {
             where.createdAt = {};
             if (date_from) where.createdAt[Op.gte] = new Date(date_from);
@@ -254,13 +268,14 @@ router.get('/sales', authenticate, async (req, res) => {
 // GET /api/stats/products - Productos más/menos vendidos
 router.get('/products', authenticate, async (req, res) => {
     try {
+        const biz = req.user.business_id;
         const { date_from, date_to, limit } = req.query;
 
-        const where = {};
+        const orderWhere = { business_id: biz };
         if (date_from || date_to) {
-            where.createdAt = {};
-            if (date_from) where.createdAt[Op.gte] = new Date(date_from);
-            if (date_to) where.createdAt[Op.lte] = new Date(date_to);
+            orderWhere.createdAt = {};
+            if (date_from) orderWhere.createdAt[Op.gte] = new Date(date_from);
+            if (date_to) orderWhere.createdAt[Op.lte] = new Date(date_to);
         }
 
         const productStats = await OrderItem.findAll({
@@ -268,7 +283,7 @@ router.get('/products', authenticate, async (req, res) => {
                 {
                     model: Order,
                     as: 'order',
-                    where,
+                    where: orderWhere,
                     attributes: []
                 },
                 {

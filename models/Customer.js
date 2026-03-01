@@ -9,8 +9,8 @@ const Customer = sequelize.define('Customer', {
     },
     phone: {
         type: DataTypes.STRING,
-        allowNull: false,
-        unique: true
+        allowNull: false
+        // unique constraint manejado a nivel BD por business_id+phone
     },
     name: {
         type: DataTypes.STRING,
@@ -27,6 +27,10 @@ const Customer = sequelize.define('Customer', {
     active: {
         type: DataTypes.BOOLEAN,
         defaultValue: true
+    },
+    business_id: {
+        type: DataTypes.INTEGER,
+        allowNull: true
     }
 }, {
     tableName: 'customers',

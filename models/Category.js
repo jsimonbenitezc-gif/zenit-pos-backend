@@ -22,6 +22,10 @@ const Category = sequelize.define('Category', {
     active: {
         type: DataTypes.BOOLEAN,
         defaultValue: true
+    },
+    business_id: {
+        type: DataTypes.INTEGER,
+        allowNull: true
     }
 }, {
     tableName: 'categories',

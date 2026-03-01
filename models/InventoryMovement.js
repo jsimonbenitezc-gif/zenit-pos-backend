@@ -43,6 +43,10 @@ const InventoryMovement = sequelize.define('InventoryMovement', {
             model: 'users',
             key: 'id'
         }
+    },
+    business_id: {
+        type: DataTypes.INTEGER,
+        allowNull: true
     }
 }, {
     tableName: 'inventory_movements',

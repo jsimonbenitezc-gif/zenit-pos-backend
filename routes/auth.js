@@ -42,7 +42,8 @@ router.post('/login', loginLimiter, async (req, res) => {
             {
                 id: user.id,
                 username: user.username,
-                role: user.role
+                role: user.role,
+                business_id: user.id
             },
             process.env.JWT_SECRET,
             { expiresIn: '30d' }
@@ -83,7 +84,7 @@ router.post('/register', async (req, res) => {
         const user = await User.create({ username: email, password, name, role: 'owner' });
 
         const token = jwt.sign(
-            { id: user.id, username: user.username, role: user.role },
+            { id: user.id, username: user.username, role: user.role, business_id: user.id },
             process.env.JWT_SECRET,
             { expiresIn: '30d' }
         );
