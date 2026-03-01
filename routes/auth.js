@@ -63,6 +63,41 @@ router.post('/login', loginLimiter, async (req, res) => {
     }
 });
 
+// POST /api/auth/register
+router.post('/register', async (req, res) => {
+    try {
+        const { name, email, password } = req.body;
+
+        if (!name || !email || !password) {
+            return res.status(400).json({ error: 'Nombre, email y contraseña son requeridos' });
+        }
+        if (password.length < 6) {
+            return res.status(400).json({ error: 'La contraseña debe tener al menos 6 caracteres' });
+        }
+
+        const existing = await User.findOne({ where: { username: email } });
+        if (existing) {
+            return res.status(409).json({ error: 'Ya existe una cuenta con ese email' });
+        }
+
+        const user = await User.create({ username: email, password, name, role: 'owner' });
+
+        const token = jwt.sign(
+            { id: user.id, username: user.username, role: user.role },
+            process.env.JWT_SECRET,
+            { expiresIn: '30d' }
+        );
+
+        res.status(201).json({
+            token,
+            user: { id: user.id, name: user.name, email: user.username, role: user.role }
+        });
+    } catch (error) {
+        console.error('Register error:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
 // GET /api/auth/me - Obtener usuario actual
 router.get('/me', authenticate, async (req, res) => {
     try {
