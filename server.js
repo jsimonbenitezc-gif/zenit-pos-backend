@@ -52,6 +52,7 @@ app.use('/api/customers', require('./routes/customers'));
 app.use('/api/stats', require('./routes/stats'));
 app.use('/api/inventory', require('./routes/inventory'));
 app.use('/api/offers', require('./routes/offers'));
+app.use('/api/settings', require('./routes/settings'));
 
 // Error handling
 app.use((err, req, res, next) => {

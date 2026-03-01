@@ -99,24 +99,6 @@ router.post('/register', async (req, res) => {
     }
 });
 
-// GET /api/auth/me - Obtener usuario actual
-router.get('/me', authenticate, async (req, res) => {
-    try {
-        const user = await User.findByPk(req.user.id, {
-            attributes: ['id', 'username', 'name', 'role', 'active']
-        });
-
-        if (!user) {
-            return res.status(404).json({ error: 'User not found' });
-        }
-
-        res.json(user);
-    } catch (error) {
-        console.error('Error al obtener usuario:', error);
-        res.status(500).json({ error: 'Error interno del servidor' });
-    }
-});
-
 // POST /api/auth/change-password
 router.post('/change-password', authenticate, async (req, res) => {
     try {

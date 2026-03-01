@@ -233,6 +233,26 @@ router.post('/preparations/:id/recipe', authenticate, isOwner, async (req, res) 
 // RECETAS DE PRODUCTOS
 // ============================================
 
+// GET /api/inventory/all-recipes — Todas las recetas del negocio (para sync)
+router.get('/all-recipes', authenticate, async (req, res) => {
+    try {
+        const biz = req.user.business_id;
+        const products = await Product.findAll({
+            where: { business_id: biz },
+            attributes: ['id']
+        });
+        const productIds = products.map(p => p.id);
+        if (productIds.length === 0) return res.json([]);
+        const { Op } = require('sequelize');
+        const recipes = await ProductRecipe.findAll({
+            where: { product_id: { [Op.in]: productIds } }
+        });
+        res.json(recipes);
+    } catch (error) {
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
 router.get('/products/:id/recipe', authenticate, async (req, res) => {
     try {
         const biz = req.user.business_id;
