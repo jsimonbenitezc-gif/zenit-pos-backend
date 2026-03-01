@@ -143,4 +143,17 @@ router.post('/change-password', authenticate, async (req, res) => {
     }
 });
 
+// GET /api/auth/me - Validar token actual
+router.get('/me', authenticate, async (req, res) => {
+    try {
+        const user = await User.findByPk(req.user.id, {
+            attributes: ['id', 'name', 'username', 'role']
+        });
+        if (!user) return res.status(401).json({ error: 'Usuario no encontrado' });
+        res.json({ id: user.id, name: user.name, email: user.username, role: user.role });
+    } catch (error) {
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
 module.exports = router;
