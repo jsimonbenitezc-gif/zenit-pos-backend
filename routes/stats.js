@@ -125,7 +125,13 @@ router.get('/dashboard', authenticate, async (req, res) => {
                 'product_id',
                 [sequelize.fn('SUM', sequelize.col('quantity')), 'total_vendido']
             ],
-            group: ['product_id', 'product.id', 'product.name', 'product.emoji', 'product.image'],
+            group: [
+                'OrderItem.product_id',
+                sequelize.col('product.id'),
+                sequelize.col('product.name'),
+                sequelize.col('product.emoji'),
+                sequelize.col('product.image')
+            ],
             order: [[sequelize.literal('total_vendido'), 'DESC']],
             limit: 5,
             raw: true,
@@ -159,8 +165,8 @@ router.get('/dashboard', authenticate, async (req, res) => {
             attributes: ['id', 'name', 'phone'],
             where: sequelize.literal(`(
                 SELECT COUNT(*) FROM orders
-                WHERE orders.customer_id = "customers"."id"
-                AND orders.business_id = ${biz}
+                WHERE orders.customer_id = "Customer"."id"
+                AND orders.business_id = ${parseInt(biz, 10)}
             ) >= 3`)
         });
 
