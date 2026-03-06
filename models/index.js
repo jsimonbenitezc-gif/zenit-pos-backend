@@ -134,6 +134,20 @@ const runMigrations = async () => {
     await safeAdd('orders', 'branch_id', { type: DataTypes.INTEGER, allowNull: true });
     await safeAdd('users',  'branch_id', { type: DataTypes.INTEGER, allowNull: true });
 
+    // Limpiar categorías duplicadas (creadas por clonación accidental de sucursales)
+    // Conserva solo la de menor ID por cada combinación business_id + nombre
+    try {
+        await sequelize.query(`
+            DELETE FROM categories
+            WHERE id NOT IN (
+                SELECT MIN(id) FROM categories GROUP BY business_id, name
+            )
+        `);
+        console.log('✅ Categorías duplicadas limpiadas');
+    } catch (err) {
+        console.error('❌ Error limpiando categorías duplicadas:', err.message);
+    }
+
     console.log('✅ Migrations applied');
 };
 
