@@ -31,6 +31,14 @@ const Customer = sequelize.define('Customer', {
     business_id: {
         type: DataTypes.INTEGER,
         allowNull: true
+    },
+    loyalty_points: {
+        type: DataTypes.INTEGER,
+        defaultValue: 0
+    },
+    in_loyalty: {
+        type: DataTypes.BOOLEAN,
+        defaultValue: false
     }
 }, {
     tableName: 'customers',

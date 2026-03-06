@@ -131,8 +131,10 @@ const runMigrations = async () => {
             }
         }
     };
-    await safeAdd('orders', 'branch_id', { type: DataTypes.INTEGER, allowNull: true });
-    await safeAdd('users',  'branch_id', { type: DataTypes.INTEGER, allowNull: true });
+    await safeAdd('orders',    'branch_id',      { type: DataTypes.INTEGER, allowNull: true });
+    await safeAdd('users',     'branch_id',      { type: DataTypes.INTEGER, allowNull: true });
+    await safeAdd('customers', 'loyalty_points', { type: DataTypes.INTEGER, defaultValue: 0 });
+    await safeAdd('customers', 'in_loyalty',     { type: DataTypes.BOOLEAN, defaultValue: false });
 
     // Limpiar categorías duplicadas (creadas por clonación accidental de sucursales)
     // Conserva solo la de menor ID por cada combinación business_id + nombre

@@ -173,6 +173,26 @@ router.put('/:id', authenticate, async (req, res) => {
     }
 });
 
+// PATCH /api/customers/:id/loyalty — actualizar puntos e inscripción en fidelidad
+router.patch('/:id/loyalty', authenticate, async (req, res) => {
+    try {
+        const biz = req.user.business_id;
+        const customer = await Customer.findOne({ where: { id: req.params.id, business_id: biz } });
+        if (!customer) return res.status(404).json({ error: 'Cliente no encontrado' });
+        const { points_delta, in_loyalty } = req.body;
+        const updates = {};
+        if (points_delta !== undefined) {
+            updates.loyalty_points = Math.max(0, (customer.loyalty_points || 0) + points_delta);
+        }
+        if (in_loyalty !== undefined) updates.in_loyalty = in_loyalty;
+        await customer.update(updates);
+        res.json(customer);
+    } catch (error) {
+        console.error('Error al actualizar fidelidad:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
 // DELETE /api/customers/:id
 router.delete('/:id', authenticate, isOwner, async (req, res) => {
     try {
