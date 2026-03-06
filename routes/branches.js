@@ -46,12 +46,7 @@ router.post('/', authenticate, isOwner, async (req, res) => {
             // 'offers' es alias para discounts + combos
             if (opts.includes('offers')) opts = [...opts, 'discounts', 'combos'];
 
-            if (opts.includes('categories')) {
-                const cats = await Category.findAll({ where: { business_id: biz, active: true } });
-                for (const c of cats) {
-                    await Category.create({ name: c.name, emoji: c.emoji, image: c.image, business_id: biz });
-                }
-            }
+            // Categorías NO se clonan: son compartidas por business_id entre todas las sucursales
 
             if (opts.includes('discounts')) {
                 const discs = await Discount.findAll({ where: { business_id: biz, active: true } });
