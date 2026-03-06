@@ -15,7 +15,7 @@ router.get('/', authenticate, async (req, res) => {
         if (branches.length === 0) {
             const primera = await Branch.create({
                 business_id: biz,
-                name: 'Sucursal Principal',
+                name: 'Esta sucursal',
                 active: true
             });
             branches = [primera];

@@ -93,9 +93,11 @@ const setupRelations = () => {
     models.Order.belongsTo(models.Branch, { foreignKey: 'branch_id', as: 'branch' });
 };
 
+const { DataTypes } = require('sequelize');
+
 // Agrega columnas nuevas de forma segura (si ya existen, no hace nada)
 const runMigrations = async () => {
-    const migrations = [
+    const sqlMigrations = [
         `ALTER TABLE categories  ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE`,
         `ALTER TABLE customers   ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE`,
         `ALTER TABLE discounts   ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE`,
@@ -104,14 +106,10 @@ const runMigrations = async () => {
         `UPDATE customers  SET active = TRUE WHERE active IS NULL`,
         `UPDATE discounts  SET active = TRUE WHERE active IS NULL`,
         `UPDATE combos     SET active = TRUE WHERE active IS NULL`,
-        // Sistema de usuarios staff: business_id vincula un empleado a su dueño
         `ALTER TABLE users ADD COLUMN IF NOT EXISTS business_id INTEGER REFERENCES users(id)`,
-        // Sucursales: branch_id en pedidos y usuarios
-        `ALTER TABLE "Orders" ADD COLUMN IF NOT EXISTS branch_id INTEGER REFERENCES "Branches"(id)`,
-        `ALTER TABLE users ADD COLUMN IF NOT EXISTS branch_id INTEGER REFERENCES "Branches"(id)`
     ];
 
-    for (const sql of migrations) {
+    for (const sql of sqlMigrations) {
         try {
             await sequelize.query(sql);
         } catch (err) {
@@ -120,6 +118,22 @@ const runMigrations = async () => {
             }
         }
     }
+
+    // Columnas de sucursal: usar QueryInterface para que Sequelize maneje el nombre de tabla correctamente
+    const qi = sequelize.getQueryInterface();
+    const safeAdd = async (table, column, definition) => {
+        try {
+            await qi.addColumn(table, column, definition);
+            console.log(`✅ Added column ${table}.${column}`);
+        } catch (err) {
+            if (!err.message.includes('already exists')) {
+                console.error(`❌ Migration ${table}.${column}:`, err.message);
+            }
+        }
+    };
+    await safeAdd('orders', 'branch_id', { type: DataTypes.INTEGER, allowNull: true });
+    await safeAdd('users',  'branch_id', { type: DataTypes.INTEGER, allowNull: true });
+
     console.log('✅ Migrations applied');
 };
 
