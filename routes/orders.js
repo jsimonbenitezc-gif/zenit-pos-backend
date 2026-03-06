@@ -18,7 +18,7 @@ router.get('/', authenticate, async (req, res) => {
         if (status) where.status = status;
         if (order_type) where.order_type = order_type;
         if (payment_method) where.payment_method = payment_method;
-        if (req.query.branch_id) where.branch_id = parseInt(req.query.branch_id);
+        if (req.query.branch_id) where[Op.and] = [{ [Op.or]: [{ branch_id: parseInt(req.query.branch_id) }, { branch_id: null }] }];
         if (date_from || date_to) {
             where.createdAt = {};
             if (date_from) where.createdAt[Op.gte] = new Date(date_from);

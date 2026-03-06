@@ -148,6 +148,23 @@ const runMigrations = async () => {
         console.error('❌ Error limpiando categorías duplicadas:', err.message);
     }
 
+    // Asignar pedidos históricos (branch_id=NULL) a la sucursal activa del negocio
+    // Estos son pedidos creados antes de que existiera el sistema de sucursales
+    try {
+        await sequelize.query(`
+            UPDATE orders
+            SET branch_id = (
+                SELECT MIN(id) FROM "Branches"
+                WHERE "Branches".business_id = orders.business_id
+                AND "Branches".active = true
+            )
+            WHERE branch_id IS NULL
+        `);
+        console.log('✅ Pedidos históricos asignados a sucursal activa');
+    } catch (err) {
+        console.error('❌ Error asignando pedidos históricos:', err.message);
+    }
+
     console.log('✅ Migrations applied');
 };
 
