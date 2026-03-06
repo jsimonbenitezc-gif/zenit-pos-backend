@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git pull origin main --no-rebase)",
+      "Bash(git stash)",
+      "Bash(git stash pop)"
+    ]
+  }
+}

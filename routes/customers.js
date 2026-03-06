@@ -118,7 +118,7 @@ router.get('/:id', authenticate, async (req, res) => {
             }]
         });
         if (!customer) {
-            return res.status(404).json({ error: 'Customer not found' });
+            return res.status(404).json({ error: 'Cliente no encontrado' });
         }
         res.json(customer);
     } catch (error) {
@@ -133,12 +133,12 @@ router.post('/', authenticate, async (req, res) => {
         const biz = req.user.business_id;
         const { phone, name, address, notes } = req.body;
         if (!phone || !name) {
-            return res.status(400).json({ error: 'Phone and name are required' });
+            return res.status(400).json({ error: 'Teléfono y nombre son requeridos' });
         }
         // Verificar si ya existe en este negocio
         const exists = await Customer.findOne({ where: { phone, business_id: biz } });
         if (exists) {
-            return res.status(400).json({ error: 'Customer with this phone already exists' });
+            return res.status(400).json({ error: 'Ya existe un cliente con ese teléfono' });
         }
         const customer = await Customer.create({ phone, name, address, notes, business_id: biz });
         res.status(201).json(customer);
@@ -156,13 +156,13 @@ router.put('/:id', authenticate, async (req, res) => {
             where: { id: req.params.id, business_id: biz }
         });
         if (!customer) {
-            return res.status(404).json({ error: 'Customer not found' });
+            return res.status(404).json({ error: 'Cliente no encontrado' });
         }
         const { phone, name, address, notes } = req.body;
         if (phone && phone !== customer.phone) {
             const exists = await Customer.findOne({ where: { phone, business_id: biz } });
             if (exists) {
-                return res.status(400).json({ error: 'Customer with this phone already exists' });
+                return res.status(400).json({ error: 'Ya existe un cliente con ese teléfono' });
             }
         }
         await customer.update({ phone, name, address, notes });
@@ -181,10 +181,10 @@ router.delete('/:id', authenticate, isOwner, async (req, res) => {
             where: { id: req.params.id, active: true, business_id: biz }
         });
         if (!customer) {
-            return res.status(404).json({ error: 'Customer not found' });
+            return res.status(404).json({ error: 'Cliente no encontrado' });
         }
         await customer.update({ active: false });
-        res.json({ message: 'Customer deleted successfully' });
+        res.json({ message: 'Cliente eliminado correctamente' });
     } catch (error) {
         console.error('Error al eliminar cliente:', error);
         res.status(500).json({ error: 'Error interno del servidor' });

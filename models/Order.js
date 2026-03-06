@@ -54,6 +54,10 @@ const Order = sequelize.define('Order', {
     business_id: {
         type: DataTypes.INTEGER,
         allowNull: true
+    },
+    branch_id: {
+        type: DataTypes.INTEGER,
+        allowNull: true
     }
 }, {
     tableName: 'orders',

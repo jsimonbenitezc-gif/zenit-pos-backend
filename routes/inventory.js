@@ -35,7 +35,7 @@ router.get('/ingredients/:id', authenticate, async (req, res) => {
             where: { id: req.params.id, business_id: biz }
         });
         if (!ingredient) {
-            return res.status(404).json({ error: 'Ingredient not found' });
+            return res.status(404).json({ error: 'Insumo no encontrado' });
         }
         res.json(ingredient);
     } catch (error) {
@@ -48,7 +48,7 @@ router.post('/ingredients', authenticate, isOwner, async (req, res) => {
         const biz = req.user.business_id;
         const { name, unit, stock, min_stock, cost_per_unit, notes } = req.body;
         if (!name || !unit) {
-            return res.status(400).json({ error: 'Name and unit are required' });
+            return res.status(400).json({ error: 'Nombre y unidad son requeridos' });
         }
         const ingredient = await Ingredient.create({
             name, unit, stock: stock || 0, min_stock: min_stock || 0,
@@ -65,7 +65,7 @@ router.put('/ingredients/:id', authenticate, isOwner, async (req, res) => {
         const biz = req.user.business_id;
         const ingredient = await Ingredient.findOne({ where: { id: req.params.id, business_id: biz } });
         if (!ingredient) {
-            return res.status(404).json({ error: 'Ingredient not found' });
+            return res.status(404).json({ error: 'Insumo no encontrado' });
         }
         const { name, unit, stock, min_stock, cost_per_unit, notes, active } = req.body;
         await ingredient.update({
@@ -88,10 +88,10 @@ router.delete('/ingredients/:id', authenticate, isOwner, async (req, res) => {
         const biz = req.user.business_id;
         const ingredient = await Ingredient.findOne({ where: { id: req.params.id, business_id: biz } });
         if (!ingredient) {
-            return res.status(404).json({ error: 'Ingredient not found' });
+            return res.status(404).json({ error: 'Insumo no encontrado' });
         }
         await ingredient.update({ active: false });
-        res.json({ message: 'Ingredient deleted successfully' });
+        res.json({ message: 'Insumo eliminado correctamente' });
     } catch (error) {
         res.status(500).json({ error: 'Error interno del servidor' });
     }
@@ -131,7 +131,7 @@ router.get('/preparations/:id', authenticate, async (req, res) => {
             }]
         });
         if (!preparation) {
-            return res.status(404).json({ error: 'Preparation not found' });
+            return res.status(404).json({ error: 'Preparación no encontrada' });
         }
         res.json(preparation);
     } catch (error) {
@@ -144,7 +144,7 @@ router.post('/preparations', authenticate, isOwner, async (req, res) => {
         const biz = req.user.business_id;
         const { name, unit, yield_quantity, notes } = req.body;
         if (!name || !unit || !yield_quantity) {
-            return res.status(400).json({ error: 'Name, unit and yield_quantity are required' });
+            return res.status(400).json({ error: 'Nombre, unidad y rendimiento son requeridos' });
         }
         const preparation = await Preparation.create({ name, unit, yield_quantity, notes, business_id: biz });
         res.status(201).json(preparation);
@@ -158,7 +158,7 @@ router.put('/preparations/:id', authenticate, isOwner, async (req, res) => {
         const biz = req.user.business_id;
         const preparation = await Preparation.findOne({ where: { id: req.params.id, business_id: biz } });
         if (!preparation) {
-            return res.status(404).json({ error: 'Preparation not found' });
+            return res.status(404).json({ error: 'Preparación no encontrada' });
         }
         const { name, unit, yield_quantity, stock, notes, active } = req.body;
         await preparation.update({
@@ -180,10 +180,10 @@ router.delete('/preparations/:id', authenticate, isOwner, async (req, res) => {
         const biz = req.user.business_id;
         const preparation = await Preparation.findOne({ where: { id: req.params.id, business_id: biz } });
         if (!preparation) {
-            return res.status(404).json({ error: 'Preparation not found' });
+            return res.status(404).json({ error: 'Preparación no encontrada' });
         }
         await preparation.update({ active: false });
-        res.json({ message: 'Preparation deleted successfully' });
+        res.json({ message: 'Preparación eliminada correctamente' });
     } catch (error) {
         res.status(500).json({ error: 'Error interno del servidor' });
     }
@@ -201,7 +201,7 @@ router.post('/preparations/:id/recipe', authenticate, isOwner, async (req, res) 
         const preparation = await Preparation.findOne({ where: { id: req.params.id, business_id: biz }, transaction: t });
         if (!preparation) {
             await t.rollback();
-            return res.status(404).json({ error: 'Preparation not found' });
+            return res.status(404).json({ error: 'Preparación no encontrada' });
         }
         await PreparationItem.destroy({ where: { preparation_id: req.params.id }, transaction: t });
         let totalCost = 0;
@@ -258,7 +258,7 @@ router.get('/products/:id/recipe', authenticate, async (req, res) => {
         const biz = req.user.business_id;
         const product = await Product.findOne({ where: { id: req.params.id, business_id: biz } });
         if (!product) {
-            return res.status(404).json({ error: 'Product not found' });
+            return res.status(404).json({ error: 'Producto no encontrado' });
         }
         const recipe = await ProductRecipe.findAll({ where: { product_id: req.params.id } });
         const enrichedRecipe = await Promise.all(recipe.map(async (item) => {
@@ -284,7 +284,7 @@ router.post('/products/:id/recipe', authenticate, isOwner, async (req, res) => {
         const product = await Product.findOne({ where: { id: req.params.id, business_id: biz }, transaction: t });
         if (!product) {
             await t.rollback();
-            return res.status(404).json({ error: 'Product not found' });
+            return res.status(404).json({ error: 'Producto no encontrado' });
         }
         await ProductRecipe.destroy({ where: { product_id: req.params.id }, transaction: t });
         for (const item of items) {
@@ -334,12 +334,12 @@ router.post('/movements', authenticate, async (req, res) => {
         const { ingredient_id, type, quantity, unit_cost, reason, notes } = req.body;
         if (!ingredient_id || !type || !quantity) {
             await t.rollback();
-            return res.status(400).json({ error: 'ingredient_id, type and quantity are required' });
+            return res.status(400).json({ error: 'ingredient_id, tipo y cantidad son requeridos' });
         }
         const ingredient = await Ingredient.findOne({ where: { id: ingredient_id, business_id: biz }, transaction: t });
         if (!ingredient) {
             await t.rollback();
-            return res.status(404).json({ error: 'Ingredient not found' });
+            return res.status(404).json({ error: 'Insumo no encontrado' });
         }
         const movement = await InventoryMovement.create({
             ingredient_id, type, quantity, unit_cost, reason, notes,

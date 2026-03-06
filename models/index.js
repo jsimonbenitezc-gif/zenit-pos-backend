@@ -20,6 +20,9 @@ const Discount = require('./Discount');
 const Combo = require('./Combo');
 const ComboItem = require('./ComboItem');
 
+// Sucursales
+const Branch = require('./Branch');
+
 // Objeto con todos los modelos
 const models = {
     User,
@@ -35,7 +38,8 @@ const models = {
     InventoryMovement,
     Discount,
     Combo,
-    ComboItem
+    ComboItem,
+    Branch
 };
 
 // Definir relaciones
@@ -79,6 +83,14 @@ const setupRelations = () => {
     models.ComboItem.belongsTo(models.Combo, { foreignKey: 'combo_id', as: 'combo' });
     models.Product.hasMany(models.ComboItem, { foreignKey: 'product_id', as: 'combo_items' });
     models.ComboItem.belongsTo(models.Product, { foreignKey: 'product_id', as: 'product' });
+
+    // Branch <-> User (dueño del negocio tiene muchas sucursales)
+    models.User.hasMany(models.Branch, { foreignKey: 'business_id', as: 'branches' });
+    models.Branch.belongsTo(models.User, { foreignKey: 'business_id', as: 'owner' });
+
+    // Branch <-> Order
+    models.Branch.hasMany(models.Order, { foreignKey: 'branch_id', as: 'orders' });
+    models.Order.belongsTo(models.Branch, { foreignKey: 'branch_id', as: 'branch' });
 };
 
 // Agrega columnas nuevas de forma segura (si ya existen, no hace nada)
@@ -91,7 +103,12 @@ const runMigrations = async () => {
         `UPDATE categories SET active = TRUE WHERE active IS NULL`,
         `UPDATE customers  SET active = TRUE WHERE active IS NULL`,
         `UPDATE discounts  SET active = TRUE WHERE active IS NULL`,
-        `UPDATE combos     SET active = TRUE WHERE active IS NULL`
+        `UPDATE combos     SET active = TRUE WHERE active IS NULL`,
+        // Sistema de usuarios staff: business_id vincula un empleado a su dueño
+        `ALTER TABLE users ADD COLUMN IF NOT EXISTS business_id INTEGER REFERENCES users(id)`,
+        // Sucursales: branch_id en pedidos y usuarios
+        `ALTER TABLE "Orders" ADD COLUMN IF NOT EXISTS branch_id INTEGER REFERENCES "Branches"(id)`,
+        `ALTER TABLE users ADD COLUMN IF NOT EXISTS branch_id INTEGER REFERENCES "Branches"(id)`
     ];
 
     for (const sql of migrations) {
@@ -118,22 +135,6 @@ const syncDatabase = async () => {
         // Migraciones: agrega columnas nuevas solo si no existen
         await runMigrations();
 
-        // Crear usuario admin por defecto si no existe
-        const adminExists = await models.User.findOne({ where: { username: 'admin' } });
-        if (!adminExists) {
-            const initialPassword = process.env.INITIAL_ADMIN_PASSWORD;
-            if (!initialPassword) {
-                console.error('❌ INITIAL_ADMIN_PASSWORD no está definida en .env — no se creó el usuario admin.');
-            } else {
-                await models.User.create({
-                    username: 'admin',
-                    password: initialPassword,
-                    name: 'Administrador',
-                    role: 'owner'
-                });
-                console.log('✅ Usuario admin creado. Cambia la contraseña después del primer login.');
-            }
-        }
     } catch (error) {
         console.error('❌ Error syncing database:', error);
     }

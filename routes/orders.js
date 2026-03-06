@@ -8,18 +8,28 @@ const { Op } = require('sequelize');
 router.get('/', authenticate, async (req, res) => {
     try {
         const biz = req.user.business_id;
-        const { status, order_type, date_from, date_to, limit } = req.query;
+        const { status, order_type, date_from, date_to, payment_method, limit = '50', page = '1' } = req.query;
+
+        const limitNum = Math.min(Math.max(parseInt(limit) || 50, 1), 200);
+        const pageNum = Math.max(parseInt(page) || 1, 1);
+        const offset = (pageNum - 1) * limitNum;
 
         const where = { business_id: biz };
         if (status) where.status = status;
         if (order_type) where.order_type = order_type;
+        if (payment_method) where.payment_method = payment_method;
+        if (req.query.branch_id) where.branch_id = parseInt(req.query.branch_id);
         if (date_from || date_to) {
             where.createdAt = {};
             if (date_from) where.createdAt[Op.gte] = new Date(date_from);
-            if (date_to) where.createdAt[Op.lte] = new Date(date_to);
+            if (date_to) {
+                const end = new Date(date_to);
+                end.setHours(23, 59, 59, 999);
+                where.createdAt[Op.lte] = end;
+            }
         }
 
-        const orders = await Order.findAll({
+        const { count, rows } = await Order.findAndCountAll({
             where,
             include: [
                 {
@@ -38,10 +48,20 @@ router.get('/', authenticate, async (req, res) => {
                 }
             ],
             order: [['createdAt', 'DESC']],
-            limit: limit ? parseInt(limit) : undefined
+            limit: limitNum,
+            offset,
+            distinct: true
         });
 
-        res.json(orders);
+        res.json({
+            data: rows,
+            pagination: {
+                total: count,
+                page: pageNum,
+                limit: limitNum,
+                pages: Math.ceil(count / limitNum)
+            }
+        });
     } catch (error) {
         res.status(500).json({ error: 'Error interno del servidor' });
     }
@@ -72,7 +92,7 @@ router.get('/:id', authenticate, async (req, res) => {
         });
 
         if (!order) {
-            return res.status(404).json({ error: 'Order not found' });
+            return res.status(404).json({ error: 'Pedido no encontrado' });
         }
 
         res.json(order);
@@ -90,12 +110,12 @@ router.post('/', authenticate, async (req, res) => {
         const {
             customer_id, customer_temp_info, items, total,
             payment_method, order_type, reference,
-            delivery_address, maps_link, notes
+            delivery_address, maps_link, notes, branch_id
         } = req.body;
 
         if (!items || items.length === 0) {
             await t.rollback();
-            return res.status(400).json({ error: 'Order must have at least one item' });
+            return res.status(400).json({ error: 'El pedido debe tener al menos un producto' });
         }
 
         const order = await Order.create({
@@ -109,7 +129,8 @@ router.post('/', authenticate, async (req, res) => {
             delivery_address,
             maps_link,
             notes,
-            business_id: biz
+            business_id: biz,
+            branch_id: branch_id || null
         }, { transaction: t });
 
         for (const item of items) {
@@ -117,7 +138,7 @@ router.post('/', authenticate, async (req, res) => {
 
             if (!product) {
                 await t.rollback();
-                return res.status(404).json({ error: `Product ${item.product_id || item.id} not found` });
+                return res.status(404).json({ error: `Producto ${item.product_id || item.id} no encontrado` });
             }
 
             await OrderItem.create({
@@ -162,12 +183,12 @@ router.put('/:id/status', authenticate, async (req, res) => {
         const { status } = req.body;
 
         if (!['registrado', 'completado', 'entregado', 'cancelado'].includes(status)) {
-            return res.status(400).json({ error: 'Invalid status' });
+            return res.status(400).json({ error: 'Estado inválido. Use: registrado, completado, entregado o cancelado' });
         }
 
         const order = await Order.findOne({ where: { id: req.params.id, business_id: biz } });
         if (!order) {
-            return res.status(404).json({ error: 'Order not found' });
+            return res.status(404).json({ error: 'Pedido no encontrado' });
         }
 
         await order.update({ status });
@@ -183,7 +204,7 @@ router.put('/:id', authenticate, async (req, res) => {
         const biz = req.user.business_id;
         const order = await Order.findOne({ where: { id: req.params.id, business_id: biz } });
         if (!order) {
-            return res.status(404).json({ error: 'Order not found' });
+            return res.status(404).json({ error: 'Pedido no encontrado' });
         }
         const { status, payment_method, order_type, reference, delivery_address, maps_link, notes } = req.body;
         await order.update({ status, payment_method, order_type, reference, delivery_address, maps_link, notes });
@@ -207,19 +228,22 @@ router.delete('/:id', authenticate, async (req, res) => {
 
         if (!order) {
             await t.rollback();
-            return res.status(404).json({ error: 'Order not found' });
+            return res.status(404).json({ error: 'Pedido no encontrado' });
         }
 
-        for (const item of order.items) {
-            const product = await Product.findByPk(item.product_id, { transaction: t });
-            if (product) {
-                await product.update({ stock: product.stock + item.quantity }, { transaction: t });
+        // Solo restaurar stock si el pedido no estaba ya cancelado (evita doble restauración)
+        if (order.status !== 'cancelado') {
+            for (const item of order.items) {
+                const product = await Product.findByPk(item.product_id, { transaction: t });
+                if (product) {
+                    await product.update({ stock: product.stock + item.quantity }, { transaction: t });
+                }
             }
         }
 
         await order.update({ status: 'cancelado' }, { transaction: t });
         await t.commit();
-        res.json({ message: 'Order cancelled successfully' });
+        res.json({ message: 'Pedido cancelado correctamente' });
     } catch (error) {
         await t.rollback();
         res.status(500).json({ error: 'Error interno del servidor' });

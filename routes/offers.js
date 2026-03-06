@@ -46,7 +46,7 @@ router.get('/discounts/:id', authenticate, async (req, res) => {
         const biz = req.user.business_id;
         const discount = await Discount.findOne({ where: { id: req.params.id, business_id: biz } });
         if (!discount) {
-            return res.status(404).json({ error: 'Discount not found' });
+            return res.status(404).json({ error: 'Descuento no encontrado' });
         }
         res.json(discount);
     } catch (error) {
@@ -62,13 +62,13 @@ router.post('/discounts', authenticate, isOwner, async (req, res) => {
             return res.status(400).json({ error: 'Name, type and value are required' });
         }
         if (!['percentage', 'fixed'].includes(type)) {
-            return res.status(400).json({ error: 'Type must be percentage or fixed' });
+            return res.status(400).json({ error: 'El tipo debe ser porcentaje o monto_fijo' });
         }
         if (!['all', 'category', 'product'].includes(applies_to)) {
-            return res.status(400).json({ error: 'applies_to must be all, category or product' });
+            return res.status(400).json({ error: 'applies_to debe ser all, category o product' });
         }
         if (type === 'percentage' && (value < 0 || value > 100)) {
-            return res.status(400).json({ error: 'Percentage must be between 0 and 100' });
+            return res.status(400).json({ error: 'El porcentaje debe estar entre 0 y 100' });
         }
         const discount = await Discount.create({
             name, type, value, applies_to: applies_to || 'all',
@@ -87,7 +87,7 @@ router.put('/discounts/:id', authenticate, isOwner, async (req, res) => {
         const biz = req.user.business_id;
         const discount = await Discount.findOne({ where: { id: req.params.id, business_id: biz } });
         if (!discount) {
-            return res.status(404).json({ error: 'Discount not found' });
+            return res.status(404).json({ error: 'Descuento no encontrado' });
         }
         const { name, type, value, applies_to, target_id, start_date, end_date, active } = req.body;
         await discount.update({
@@ -111,10 +111,10 @@ router.delete('/discounts/:id', authenticate, isOwner, async (req, res) => {
         const biz = req.user.business_id;
         const discount = await Discount.findOne({ where: { id: req.params.id, business_id: biz } });
         if (!discount) {
-            return res.status(404).json({ error: 'Discount not found' });
+            return res.status(404).json({ error: 'Descuento no encontrado' });
         }
         await discount.update({ active: false });
-        res.json({ message: 'Discount deleted successfully' });
+        res.json({ message: 'Descuento eliminado correctamente' });
     } catch (error) {
         res.status(500).json({ error: 'Error interno del servidor' });
     }
@@ -125,7 +125,7 @@ router.post('/discounts/calculate', authenticate, async (req, res) => {
         const biz = req.user.business_id;
         const { product_id, category_id, amount } = req.body;
         if (!amount) {
-            return res.status(400).json({ error: 'Amount is required' });
+            return res.status(400).json({ error: 'El monto es requerido' });
         }
         const now = new Date();
         const dateFilter = [
@@ -209,7 +209,7 @@ router.get('/combos/:id', authenticate, async (req, res) => {
             }]
         });
         if (!combo) {
-            return res.status(404).json({ error: 'Combo not found' });
+            return res.status(404).json({ error: 'Combo no encontrado' });
         }
         res.json(combo);
     } catch (error) {
@@ -222,7 +222,7 @@ router.post('/combos', authenticate, isOwner, async (req, res) => {
         const biz = req.user.business_id;
         const { name, description, emoji, image, price, active } = req.body;
         if (!name || !price) {
-            return res.status(400).json({ error: 'Name and price are required' });
+            return res.status(400).json({ error: 'Nombre y precio son requeridos' });
         }
         const combo = await Combo.create({
             name, description, emoji: emoji || '🎁', image, price,
@@ -239,7 +239,7 @@ router.put('/combos/:id', authenticate, isOwner, async (req, res) => {
         const biz = req.user.business_id;
         const combo = await Combo.findOne({ where: { id: req.params.id, business_id: biz } });
         if (!combo) {
-            return res.status(404).json({ error: 'Combo not found' });
+            return res.status(404).json({ error: 'Combo no encontrado' });
         }
         const { name, description, emoji, image, price, original_price, active } = req.body;
         await combo.update({
@@ -262,10 +262,10 @@ router.delete('/combos/:id', authenticate, isOwner, async (req, res) => {
         const biz = req.user.business_id;
         const combo = await Combo.findOne({ where: { id: req.params.id, business_id: biz } });
         if (!combo) {
-            return res.status(404).json({ error: 'Combo not found' });
+            return res.status(404).json({ error: 'Combo no encontrado' });
         }
         await combo.update({ active: false });
-        res.json({ message: 'Combo deleted successfully' });
+        res.json({ message: 'Combo eliminado correctamente' });
     } catch (error) {
         res.status(500).json({ error: 'Error interno del servidor' });
     }
@@ -279,7 +279,7 @@ router.post('/combos/:id/items', authenticate, isOwner, async (req, res) => {
         const combo = await Combo.findOne({ where: { id: req.params.id, business_id: biz }, transaction: t });
         if (!combo) {
             await t.rollback();
-            return res.status(404).json({ error: 'Combo not found' });
+            return res.status(404).json({ error: 'Combo no encontrado' });
         }
         await ComboItem.destroy({ where: { combo_id: req.params.id }, transaction: t });
         let originalPrice = 0;

@@ -8,6 +8,8 @@ const { Op } = require('sequelize');
 router.get('/dashboard', authenticate, async (req, res) => {
     try {
         const biz = req.user.business_id;
+        // Filtro opcional por sucursal (dueño puede ver una sucursal específica)
+        const branchFilter = req.query.branch_id ? { branch_id: parseInt(req.query.branch_id) } : {};
 
         const hoy = new Date();
         hoy.setHours(0, 0, 0, 0);
@@ -24,7 +26,8 @@ router.get('/dashboard', authenticate, async (req, res) => {
         const ventasHoy = await Order.findAll({
             where: {
                 business_id: biz,
-                createdAt: { [Op.gte]: hoy }
+                createdAt: { [Op.gte]: hoy },
+                ...branchFilter
             },
             attributes: [
                 [sequelize.fn('COUNT', sequelize.col('id')), 'total_pedidos'],
@@ -41,7 +44,8 @@ router.get('/dashboard', authenticate, async (req, res) => {
                 createdAt: {
                     [Op.gte]: ayer,
                     [Op.lt]: hoy
-                }
+                },
+                ...branchFilter
             },
             attributes: [
                 [sequelize.fn('COUNT', sequelize.col('id')), 'total_pedidos'],
@@ -54,7 +58,8 @@ router.get('/dashboard', authenticate, async (req, res) => {
         const ultimos7Dias = await Order.findAll({
             where: {
                 business_id: biz,
-                createdAt: { [Op.gte]: hace7Dias }
+                createdAt: { [Op.gte]: hace7Dias },
+                ...branchFilter
             },
             attributes: [
                 [sequelize.fn('DATE', sequelize.col('createdAt')), 'fecha'],
@@ -73,7 +78,8 @@ router.get('/dashboard', authenticate, async (req, res) => {
                 as: 'order',
                 where: {
                     business_id: biz,
-                    createdAt: { [Op.gte]: hoy }
+                    createdAt: { [Op.gte]: hoy },
+                    ...branchFilter
                 },
                 attributes: []
             }],
@@ -97,7 +103,8 @@ router.get('/dashboard', authenticate, async (req, res) => {
             where: {
                 business_id: biz,
                 createdAt: { [Op.gte]: hoy },
-                customer_id: { [Op.ne]: null }
+                customer_id: { [Op.ne]: null },
+                ...branchFilter
             },
             distinct: true,
             col: 'customer_id'
@@ -111,7 +118,8 @@ router.get('/dashboard', authenticate, async (req, res) => {
                     as: 'order',
                     where: {
                         business_id: biz,
-                        createdAt: { [Op.gte]: hace7Dias }
+                        createdAt: { [Op.gte]: hace7Dias },
+                        ...branchFilter
                     },
                     attributes: []
                 },
@@ -140,7 +148,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
 
         // 8. ÚLTIMAS 5 VENTAS
         const ultimasVentas = await Order.findAll({
-            where: { business_id: biz },
+            where: { business_id: biz, ...branchFilter },
             include: [{
                 model: Customer,
                 as: 'customer',
@@ -158,7 +166,8 @@ router.get('/dashboard', authenticate, async (req, res) => {
                 as: 'orders',
                 where: {
                     business_id: biz,
-                    createdAt: { [Op.gte]: hoy }
+                    createdAt: { [Op.gte]: hoy },
+                    ...branchFilter
                 },
                 attributes: []
             }],
@@ -174,7 +183,8 @@ router.get('/dashboard', authenticate, async (req, res) => {
         const ventasPorHora = await Order.findAll({
             where: {
                 business_id: biz,
-                createdAt: { [Op.gte]: hoy }
+                createdAt: { [Op.gte]: hoy },
+                ...branchFilter
             },
             attributes: [
                 [sequelize.fn('EXTRACT', sequelize.literal("HOUR FROM \"createdAt\"")), 'hora'],

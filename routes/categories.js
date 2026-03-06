@@ -26,7 +26,7 @@ router.get('/:id', authenticate, async (req, res) => {
             where: { id: req.params.id, active: true, business_id: biz }
         });
         if (!category) {
-            return res.status(404).json({ error: 'Category not found' });
+            return res.status(404).json({ error: 'Categoría no encontrada' });
         }
         res.json(category);
     } catch (error) {
@@ -41,7 +41,7 @@ router.post('/', authenticate, isOwner, async (req, res) => {
         const biz = req.user.business_id;
         const { name, emoji, image } = req.body;
         if (!name) {
-            return res.status(400).json({ error: 'Name is required' });
+            return res.status(400).json({ error: 'El nombre es requerido' });
         }
         const category = await Category.create({ name, emoji, image, business_id: biz });
         res.status(201).json(category);
@@ -59,7 +59,7 @@ router.put('/:id', authenticate, isOwner, async (req, res) => {
             where: { id: req.params.id, active: true, business_id: biz }
         });
         if (!category) {
-            return res.status(404).json({ error: 'Category not found' });
+            return res.status(404).json({ error: 'Categoría no encontrada' });
         }
         const { name, emoji, image } = req.body;
         await category.update({ name, emoji, image });
@@ -78,10 +78,10 @@ router.delete('/:id', authenticate, isOwner, async (req, res) => {
             where: { id: req.params.id, active: true, business_id: biz }
         });
         if (!category) {
-            return res.status(404).json({ error: 'Category not found' });
+            return res.status(404).json({ error: 'Categoría no encontrada' });
         }
         await category.update({ active: false });
-        res.json({ message: 'Category deleted successfully' });
+        res.json({ message: 'Categoría eliminada correctamente' });
     } catch (error) {
         console.error('Error al eliminar categoría:', error);
         res.status(500).json({ error: 'Error interno del servidor' });

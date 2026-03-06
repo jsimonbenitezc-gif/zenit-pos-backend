@@ -55,6 +55,7 @@ app.use('/api/offers', require('./routes/offers'));
 app.use('/api/settings', require('./routes/settings'));
 app.use('/api/staff', require('./routes/staff'));
 app.use('/api/alerts', require('./routes/alerts'));
+app.use('/api/branches', require('./routes/branches'));
 
 // Error handling
 app.use((err, req, res, next) => {

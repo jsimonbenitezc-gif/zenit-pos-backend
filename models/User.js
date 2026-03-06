@@ -32,6 +32,16 @@ const User = sequelize.define('User', {
     settings: {
         type: DataTypes.TEXT,
         allowNull: true
+    },
+    // ID del dueño al que pertenece este usuario staff (null si es owner)
+    business_id: {
+        type: DataTypes.INTEGER,
+        allowNull: true
+    },
+    // Sucursal asignada a este usuario
+    branch_id: {
+        type: DataTypes.INTEGER,
+        allowNull: true
     }
 }, {
     tableName: 'users',

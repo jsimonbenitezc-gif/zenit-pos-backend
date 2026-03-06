@@ -14,27 +14,36 @@ const loginLimiter = rateLimit({
     legacyHeaders: false
 });
 
+// Protección: máximo 5 registros por hora por IP
+const registerLimiter = rateLimit({
+    windowMs: 60 * 60 * 1000, // 1 hora
+    max: 5,
+    message: { error: 'Demasiados registros desde esta IP. Intenta de nuevo en una hora.' },
+    standardHeaders: true,
+    legacyHeaders: false
+});
+
 // POST /api/auth/login
 router.post('/login', loginLimiter, async (req, res) => {
     try {
         const { username, password } = req.body;
 
         if (!username || !password) {
-            return res.status(400).json({ error: 'Username and password required' });
+            return res.status(400).json({ error: 'Usuario y contraseña son requeridos' });
         }
 
         // Buscar usuario
         const user = await User.findOne({ where: { username, active: true } });
 
         if (!user) {
-            return res.status(401).json({ error: 'Invalid credentials' });
+            return res.status(401).json({ error: 'Credenciales incorrectas' });
         }
 
         // Verificar contraseña
         const validPassword = await user.comparePassword(password);
 
         if (!validPassword) {
-            return res.status(401).json({ error: 'Invalid credentials' });
+            return res.status(401).json({ error: 'Credenciales incorrectas' });
         }
 
         // Crear token
@@ -43,7 +52,8 @@ router.post('/login', loginLimiter, async (req, res) => {
                 id: user.id,
                 username: user.username,
                 role: user.role,
-                business_id: user.id
+                business_id: user.id,
+                branch_id: user.branch_id || null
             },
             process.env.JWT_SECRET,
             { expiresIn: '30d' }
@@ -65,7 +75,7 @@ router.post('/login', loginLimiter, async (req, res) => {
 });
 
 // POST /api/auth/register
-router.post('/register', async (req, res) => {
+router.post('/register', registerLimiter, async (req, res) => {
     try {
         const { name, email, password } = req.body;
 
@@ -112,13 +122,13 @@ router.post('/change-password', authenticate, async (req, res) => {
         const validPassword = await user.comparePassword(currentPassword);
 
         if (!validPassword) {
-            return res.status(401).json({ error: 'Current password is incorrect' });
+            return res.status(401).json({ error: 'La contraseña actual es incorrecta' });
         }
 
         user.password = newPassword;
         await user.save();
 
-        res.json({ message: 'Password changed successfully' });
+        res.json({ message: 'Contraseña cambiada correctamente' });
     } catch (error) {
         console.error('Error al cambiar contraseña:', error);
         res.status(500).json({ error: 'Error interno del servidor' });

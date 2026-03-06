@@ -104,7 +104,7 @@ router.get('/:id', authenticate, async (req, res) => {
             }]
         });
         if (!product) {
-            return res.status(404).json({ error: 'Product not found' });
+            return res.status(404).json({ error: 'Producto no encontrado' });
         }
         res.json(product);
     } catch (error) {
@@ -118,7 +118,7 @@ router.post('/', authenticate, isOwner, async (req, res) => {
         const biz = req.user.business_id;
         const { name, description, price, stock, category_id, emoji, image } = req.body;
         if (!name || !price) {
-            return res.status(400).json({ error: 'Name and price are required' });
+            return res.status(400).json({ error: 'Nombre y precio son requeridos' });
         }
         const product = await Product.create({
             name,
@@ -144,7 +144,7 @@ router.put('/:id', authenticate, isOwner, async (req, res) => {
             where: { id: req.params.id, business_id: biz }
         });
         if (!product) {
-            return res.status(404).json({ error: 'Product not found' });
+            return res.status(404).json({ error: 'Producto no encontrado' });
         }
         const { name, description, price, stock, category_id, emoji, image, active } = req.body;
         await product.update({
@@ -171,10 +171,10 @@ router.delete('/:id', authenticate, isOwner, async (req, res) => {
             where: { id: req.params.id, business_id: biz }
         });
         if (!product) {
-            return res.status(404).json({ error: 'Product not found' });
+            return res.status(404).json({ error: 'Producto no encontrado' });
         }
         await product.update({ active: false });
-        res.json({ message: 'Product deleted successfully' });
+        res.json({ message: 'Producto eliminado correctamente' });
     } catch (error) {
         res.status(500).json({ error: 'Error interno del servidor' });
     }
