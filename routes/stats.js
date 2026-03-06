@@ -8,8 +8,10 @@ const { Op } = require('sequelize');
 router.get('/dashboard', authenticate, async (req, res) => {
     try {
         const biz = req.user.business_id;
-        // Filtro opcional por sucursal (dueño puede ver una sucursal específica)
-        const branchFilter = req.query.branch_id ? { branch_id: parseInt(req.query.branch_id) } : {};
+        // Filtro opcional por sucursal (incluye pedidos sin sucursal asignada = histórico)
+        const branchFilter = req.query.branch_id
+            ? { [Op.or]: [{ branch_id: parseInt(req.query.branch_id) }, { branch_id: null }] }
+            : {};
 
         const hoy = new Date();
         hoy.setHours(0, 0, 0, 0);
