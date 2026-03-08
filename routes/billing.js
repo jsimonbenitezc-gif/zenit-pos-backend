@@ -79,6 +79,7 @@ router.post('/create-checkout', authenticate, async (req, res) => {
             cancel_url:  `${process.env.APP_URL}/billing-cancel`,
             locale: 'es',
             allow_promotion_codes: true,
+            metadata: { user_id: String(user.id) },
             payment_method_options: {
                 card: { request_three_d_secure: 'automatic' }
             }
@@ -127,11 +128,39 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
 
     try {
         switch (event.type) {
+            // Checkout completado — guarda stripe_customer_id y activa premium
+            case 'checkout.session.completed': {
+                const session = event.data.object;
+                if (session.mode === 'subscription' && session.subscription) {
+                    const sub = await stripe.subscriptions.retrieve(session.subscription);
+                    // Buscar por stripe_customer_id primero, luego por metadata.user_id como fallback
+                    let user = await User.findOne({ where: { stripe_customer_id: session.customer } });
+                    if (!user && session.metadata && session.metadata.user_id) {
+                        user = await User.findByPk(parseInt(session.metadata.user_id));
+                        console.log(`ℹ️ checkout.session.completed: buscando por metadata.user_id=${session.metadata.user_id}`);
+                    }
+                    if (user) {
+                        const expiresAt = new Date(sub.current_period_end * 1000);
+                        await user.update({
+                            plan: 'premium',
+                            plan_expires_at: expiresAt,
+                            stripe_customer_id: session.customer,
+                            stripe_subscription_id: sub.id
+                        });
+                        console.log(`✅ checkout.session.completed: Premium activado para user ${user.id} (customer=${session.customer})`);
+                    } else {
+                        console.warn(`⚠️ checkout.session.completed: no se encontró usuario para customer="${session.customer}"`);
+                    }
+                }
+                break;
+            }
+
             // Suscripción creada o renovada exitosamente
             case 'invoice.payment_succeeded': {
                 const invoice = event.data.object;
                 if (invoice.subscription) {
                     const sub = await stripe.subscriptions.retrieve(invoice.subscription);
+                    console.log(`ℹ️ invoice.payment_succeeded: buscando usuario con stripe_customer_id="${sub.customer}"`);
                     const user = await User.findOne({ where: { stripe_customer_id: sub.customer } });
                     if (user) {
                         const expiresAt = new Date(sub.current_period_end * 1000);
@@ -141,6 +170,8 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
                             stripe_subscription_id: sub.id
                         });
                         console.log(`✅ Plan premium activado: user ${user.id} hasta ${expiresAt.toISOString()}`);
+                    } else {
+                        console.warn(`⚠️ WEBHOOK invoice.payment_succeeded: no se encontró usuario con stripe_customer_id="${sub.customer}". La suscripción NO fue activada.`);
                     }
                 }
                 break;
