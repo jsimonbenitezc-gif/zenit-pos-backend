@@ -34,39 +34,38 @@ router.get('/sync', authenticate, async (req, res) => {
         const user = await User.findByPk(req.user.id);
         if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
 
-        if (!user.stripe_customer_id) {
-            // Sin customer → buscar por email en Stripe por si se creó sin guardar
-            const customers = await stripe.customers.list({ email: user.username, limit: 1 });
-            if (customers.data.length === 0) return res.json(planInfo(user));
-            const customer = customers.data[0];
-            await user.update({ stripe_customer_id: customer.id });
-            user.stripe_customer_id = customer.id;
-        }
+        // Solo consultar Stripe si el usuario ya tiene un customer_id
+        // (es decir, pasó por el checkout al menos una vez)
+        if (user.stripe_customer_id) {
+            try {
+                let subs = await stripe.subscriptions.list({
+                    customer: user.stripe_customer_id,
+                    status: 'active',
+                    limit: 1
+                });
+                if (subs.data.length === 0) {
+                    subs = await stripe.subscriptions.list({
+                        customer: user.stripe_customer_id,
+                        status: 'trialing',
+                        limit: 1
+                    });
+                }
+                console.log(`ℹ️ billing/sync user ${user.id}: subs_found=${subs.data.length}`);
 
-        // Buscar suscripción activa o en prueba en Stripe
-        let subs = await stripe.subscriptions.list({
-            customer: user.stripe_customer_id,
-            status: 'active',
-            limit: 1
-        });
-        if (subs.data.length === 0) {
-            subs = await stripe.subscriptions.list({
-                customer: user.stripe_customer_id,
-                status: 'trialing',
-                limit: 1
-            });
-        }
-        console.log(`ℹ️ billing/sync user ${user.id}: stripe_customer_id=${user.stripe_customer_id}, subs_found=${subs.data.length}`);
-
-        if (subs.data.length > 0) {
-            const sub = subs.data[0];
-            const expiresAt = new Date(sub.current_period_end * 1000);
-            await user.update({
-                plan: 'premium',
-                plan_expires_at: expiresAt,
-                stripe_subscription_id: sub.id
-            });
-            console.log(`✅ billing/sync: Premium confirmado para user ${user.id} (sub=${sub.id})`);
+                if (subs.data.length > 0) {
+                    const sub = subs.data[0];
+                    const expiresAt = new Date(sub.current_period_end * 1000);
+                    await user.update({
+                        plan: 'premium',
+                        plan_expires_at: expiresAt,
+                        stripe_subscription_id: sub.id
+                    });
+                    console.log(`✅ billing/sync: Premium activado user ${user.id}`);
+                }
+            } catch (stripeErr) {
+                // Si Stripe falla, devolvemos el plan actual de la BD sin error
+                console.error('billing/sync Stripe error:', stripeErr.message);
+            }
         }
 
         res.json(planInfo(user));
