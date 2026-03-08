@@ -17,7 +17,8 @@ if (process.env.STRIPE_SECRET_KEY) {
 
 function planInfo(user) {
     const now = new Date();
-    const expiresAt = user.plan_expires_at ? new Date(user.plan_expires_at) : null;
+    const rawExpires = user.plan_expires_at ? new Date(user.plan_expires_at) : null;
+    const expiresAt = rawExpires && !Number.isNaN(rawExpires.getTime()) ? rawExpires : null;
     const isPremium  = (user.plan === 'premium' || user.plan === 'trial') && expiresAt && expiresAt > now;
     const daysLeft   = expiresAt ? Math.max(0, Math.ceil((expiresAt - now) / 86400000)) : 0;
     return { plan: user.plan, plan_expires_at: expiresAt, is_premium: isPremium, days_left: daysLeft };
@@ -38,6 +39,52 @@ async function resolvePlanTargetUser(user) {
         return await User.findByPk(user.business_id);
     }
     return user;
+}
+
+function parseStripeTimestamp(value) {
+    if (value === null || value === undefined) return null;
+
+    // Timestamp numérico: segundos o milisegundos
+    if (typeof value === 'number' && Number.isFinite(value)) {
+        const ms = value > 1e12 ? value : value * 1000;
+        const d = new Date(ms);
+        return Number.isNaN(d.getTime()) ? null : d;
+    }
+
+    // Timestamp en string numérico
+    if (typeof value === 'string' && /^\d+$/.test(value)) {
+        const n = Number(value);
+        const ms = n > 1e12 ? n : n * 1000;
+        const d = new Date(ms);
+        return Number.isNaN(d.getTime()) ? null : d;
+    }
+
+    // Fecha ISO en string
+    if (typeof value === 'string') {
+        const d = new Date(value);
+        return Number.isNaN(d.getTime()) ? null : d;
+    }
+
+    return null;
+}
+
+function resolveSubscriptionExpiry(sub, fallbackDate) {
+    const candidates = [
+        sub?.current_period_end,
+        sub?.current_period_end_at,
+        sub?.trial_end,
+        sub?.items?.data?.[0]?.current_period_end,
+        sub?.items?.data?.[0]?.period?.end,
+        sub?.latest_invoice?.lines?.data?.[0]?.period?.end
+    ];
+
+    for (const c of candidates) {
+        const d = parseStripeTimestamp(c);
+        if (d) return d;
+    }
+
+    // Último recurso para no dejar al usuario en premium inválido
+    return fallbackDate || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 }
 
 // ─── GET /api/billing/config-check ───────────────────────────────────────────
@@ -112,7 +159,7 @@ router.get('/sync', authenticate, async (req, res) => {
 
                 if (subs.data.length > 0) {
                     const sub = subs.data[0];
-                    const expiresAt = new Date(sub.current_period_end * 1000);
+                    const expiresAt = resolveSubscriptionExpiry(sub, user.plan_expires_at ? new Date(user.plan_expires_at) : null);
                     await user.update({
                         plan: 'premium',
                         plan_expires_at: expiresAt,
@@ -250,7 +297,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
                     }
                     const target = await resolvePlanTargetUser(user);
                     if (target) {
-                        const expiresAt = new Date(sub.current_period_end * 1000);
+                        const expiresAt = resolveSubscriptionExpiry(sub, target.plan_expires_at ? new Date(target.plan_expires_at) : null);
                         await target.update({
                             plan: 'premium',
                             plan_expires_at: expiresAt,
@@ -274,7 +321,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
                     const user = await User.findOne({ where: { stripe_customer_id: sub.customer } });
                     const target = await resolvePlanTargetUser(user);
                     if (target) {
-                        const expiresAt = new Date(sub.current_period_end * 1000);
+                        const expiresAt = resolveSubscriptionExpiry(sub, target.plan_expires_at ? new Date(target.plan_expires_at) : null);
                         await target.update({
                             plan: 'premium',
                             plan_expires_at: expiresAt,
@@ -323,7 +370,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
                 const user = await User.findOne({ where: { stripe_customer_id: sub.customer } });
                 const target = await resolvePlanTargetUser(user);
                 if (target && sub.status === 'active') {
-                    const expiresAt = new Date(sub.current_period_end * 1000);
+                    const expiresAt = resolveSubscriptionExpiry(sub, target.plan_expires_at ? new Date(target.plan_expires_at) : null);
                     await target.update({ plan: 'premium', plan_expires_at: expiresAt });
                 }
                 break;
