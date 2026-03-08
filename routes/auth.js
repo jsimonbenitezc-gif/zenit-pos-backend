@@ -47,12 +47,13 @@ router.post('/login', loginLimiter, async (req, res) => {
         }
 
         // Crear token
+        const businessId = user.business_id || user.id;
         const token = jwt.sign(
             {
                 id: user.id,
                 username: user.username,
                 role: user.role,
-                business_id: user.id,
+                business_id: businessId,
                 branch_id: user.branch_id || null,
                 plan: user.plan || 'free',
                 plan_expires_at: user.plan_expires_at || null
@@ -68,6 +69,7 @@ router.post('/login', loginLimiter, async (req, res) => {
                 username: user.username,
                 name: user.name,
                 role: user.role,
+                business_id: businessId,
                 plan: user.plan || 'free',
                 plan_expires_at: user.plan_expires_at || null
             }

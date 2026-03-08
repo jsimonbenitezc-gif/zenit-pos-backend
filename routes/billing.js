@@ -22,6 +22,15 @@ function planInfo(user) {
     return { plan: user.plan, plan_expires_at: expiresAt, is_premium: isPremium, days_left: daysLeft };
 }
 
+async function resolveBillingOwner(authUserId) {
+    const actor = await User.findByPk(authUserId, {
+        attributes: ['id', 'business_id']
+    });
+    if (!actor) return null;
+    const ownerId = actor.business_id || actor.id;
+    return await User.findByPk(ownerId);
+}
+
 // ─── GET /api/billing/config-check ───────────────────────────────────────────
 // Verifica que las variables de Stripe estén configuradas (solo para diagnóstico)
 router.get('/config-check', authenticate, (req, res) => {
@@ -40,7 +49,7 @@ router.get('/config-check', authenticate, (req, res) => {
 // Devuelve el estado del plan del usuario autenticado
 router.get('/status', authenticate, async (req, res) => {
     try {
-        const user = await User.findByPk(req.user.id);
+        const user = await resolveBillingOwner(req.user.id);
         if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
         res.json(planInfo(user));
     } catch (err) {
@@ -53,7 +62,7 @@ router.get('/status', authenticate, async (req, res) => {
 // como alternativa a webhooks para detectar pagos recién completados.
 router.get('/sync', authenticate, async (req, res) => {
     try {
-        const user = await User.findByPk(req.user.id);
+        const user = await resolveBillingOwner(req.user.id);
         if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
 
         // Solo consultar Stripe si el usuario ya tiene un customer_id y Stripe está listo
@@ -100,7 +109,7 @@ router.get('/sync', authenticate, async (req, res) => {
 // Activa 30 días de prueba (solo si nunca ha tenido plan premium ni trial)
 router.post('/start-trial', authenticate, async (req, res) => {
     try {
-        const user = await User.findByPk(req.user.id);
+        const user = await resolveBillingOwner(req.user.id);
         if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
 
         // Solo si nunca ha activado prueba antes
@@ -124,7 +133,7 @@ router.post('/create-checkout', authenticate, async (req, res) => {
     if (!stripe) return res.status(503).json({ error: 'Stripe no está configurado en el servidor. Contacta al administrador.' });
     if (!process.env.STRIPE_PRICE_ID) return res.status(503).json({ error: 'STRIPE_PRICE_ID no configurado en el servidor.' });
     try {
-        const user = await User.findByPk(req.user.id);
+        const user = await resolveBillingOwner(req.user.id);
         if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
 
         // Crear o recuperar customer de Stripe
@@ -168,7 +177,7 @@ router.post('/create-checkout', authenticate, async (req, res) => {
 // Crea sesión del portal de Stripe (gestionar/cancelar suscripción, ver facturas)
 router.post('/portal', authenticate, async (req, res) => {
     try {
-        const user = await User.findByPk(req.user.id);
+        const user = await resolveBillingOwner(req.user.id);
         if (!user || !user.stripe_customer_id) {
             return res.status(400).json({ error: 'No hay suscripción activa' });
         }
