@@ -26,6 +26,48 @@ router.get('/status', authenticate, async (req, res) => {
     }
 });
 
+// ─── GET /api/billing/sync ───────────────────────────────────────────────────
+// Consulta Stripe en tiempo real y actualiza el plan en BD. Usado por el app
+// como alternativa a webhooks para detectar pagos recién completados.
+router.get('/sync', authenticate, async (req, res) => {
+    try {
+        const user = await User.findByPk(req.user.id);
+        if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
+
+        if (!user.stripe_customer_id) {
+            // Sin customer → buscar por email en Stripe por si se creó sin guardar
+            const customers = await stripe.customers.list({ email: user.username, limit: 1 });
+            if (customers.data.length === 0) return res.json(planInfo(user));
+            const customer = customers.data[0];
+            await user.update({ stripe_customer_id: customer.id });
+            user.stripe_customer_id = customer.id;
+        }
+
+        // Buscar suscripción activa en Stripe
+        const subs = await stripe.subscriptions.list({
+            customer: user.stripe_customer_id,
+            status: 'active',
+            limit: 1
+        });
+
+        if (subs.data.length > 0) {
+            const sub = subs.data[0];
+            const expiresAt = new Date(sub.current_period_end * 1000);
+            await user.update({
+                plan: 'premium',
+                plan_expires_at: expiresAt,
+                stripe_subscription_id: sub.id
+            });
+            console.log(`✅ billing/sync: Premium confirmado para user ${user.id} (sub=${sub.id})`);
+        }
+
+        res.json(planInfo(user));
+    } catch (err) {
+        console.error('billing/sync error:', err.message);
+        res.status(500).json({ error: 'Error interno' });
+    }
+});
+
 // ─── POST /api/billing/start-trial ──────────────────────────────────────────
 // Activa 30 días de prueba (solo si nunca ha tenido plan premium ni trial)
 router.post('/start-trial', authenticate, async (req, res) => {
