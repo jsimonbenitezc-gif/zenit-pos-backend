@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const { Op } = require('sequelize');
 const { authenticate } = require('../middleware/auth');
 const { User } = require('../models');
 
@@ -29,6 +30,14 @@ async function resolveBillingOwner(authUserId) {
     if (!actor) return null;
     const ownerId = actor.business_id || actor.id;
     return await User.findByPk(ownerId);
+}
+
+async function resolvePlanTargetUser(user) {
+    if (!user) return null;
+    if (user.business_id) {
+        return await User.findByPk(user.business_id);
+    }
+    return user;
 }
 
 // ─── GET /api/billing/config-check ───────────────────────────────────────────
@@ -64,6 +73,25 @@ router.get('/sync', authenticate, async (req, res) => {
     try {
         const user = await resolveBillingOwner(req.user.id);
         if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
+
+        // Compatibilidad: si un checkout histórico guardó stripe_customer_id en staff,
+        // moverlo al owner para que el plan se evalúe correctamente en todo el negocio.
+        if (!user.stripe_customer_id) {
+            const legacyHolder = await User.findOne({
+                where: {
+                    business_id: user.id,
+                    stripe_customer_id: { [Op.ne]: null }
+                },
+                attributes: ['id', 'stripe_customer_id', 'stripe_subscription_id']
+            });
+            if (legacyHolder?.stripe_customer_id) {
+                await user.update({
+                    stripe_customer_id: legacyHolder.stripe_customer_id,
+                    stripe_subscription_id: user.stripe_subscription_id || legacyHolder.stripe_subscription_id || null
+                });
+                console.log(`ℹ️ billing/sync: migrado customer ${legacyHolder.stripe_customer_id} de staff ${legacyHolder.id} a owner ${user.id}`);
+            }
+        }
 
         // Solo consultar Stripe si el usuario ya tiene un customer_id y Stripe está listo
         if (stripe && user.stripe_customer_id) {
@@ -220,15 +248,16 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
                         user = await User.findByPk(parseInt(session.metadata.user_id));
                         console.log(`ℹ️ checkout.session.completed: buscando por metadata.user_id=${session.metadata.user_id}`);
                     }
-                    if (user) {
+                    const target = await resolvePlanTargetUser(user);
+                    if (target) {
                         const expiresAt = new Date(sub.current_period_end * 1000);
-                        await user.update({
+                        await target.update({
                             plan: 'premium',
                             plan_expires_at: expiresAt,
                             stripe_customer_id: session.customer,
                             stripe_subscription_id: sub.id
                         });
-                        console.log(`✅ checkout.session.completed: Premium activado para user ${user.id} (customer=${session.customer})`);
+                        console.log(`✅ checkout.session.completed: Premium activado para user ${target.id} (customer=${session.customer})`);
                     } else {
                         console.warn(`⚠️ checkout.session.completed: no se encontró usuario para customer="${session.customer}"`);
                     }
@@ -243,14 +272,15 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
                     const sub = await stripe.subscriptions.retrieve(invoice.subscription);
                     console.log(`ℹ️ invoice.payment_succeeded: buscando usuario con stripe_customer_id="${sub.customer}"`);
                     const user = await User.findOne({ where: { stripe_customer_id: sub.customer } });
-                    if (user) {
+                    const target = await resolvePlanTargetUser(user);
+                    if (target) {
                         const expiresAt = new Date(sub.current_period_end * 1000);
-                        await user.update({
+                        await target.update({
                             plan: 'premium',
                             plan_expires_at: expiresAt,
                             stripe_subscription_id: sub.id
                         });
-                        console.log(`✅ Plan premium activado: user ${user.id} hasta ${expiresAt.toISOString()}`);
+                        console.log(`✅ Plan premium activado: user ${target.id} hasta ${expiresAt.toISOString()}`);
                     } else {
                         console.warn(`⚠️ WEBHOOK invoice.payment_succeeded: no se encontró usuario con stripe_customer_id="${sub.customer}". La suscripción NO fue activada.`);
                     }
@@ -262,8 +292,9 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
             case 'invoice.payment_failed': {
                 const invoice = event.data.object;
                 const user = await User.findOne({ where: { stripe_customer_id: invoice.customer } });
-                if (user) {
-                    console.warn(`⚠️ Pago fallido para user ${user.id}`);
+                const target = await resolvePlanTargetUser(user);
+                if (target) {
+                    console.warn(`⚠️ Pago fallido para user ${target.id}`);
                     // No degradamos inmediatamente — Stripe reintenta automáticamente
                     // La degradación ocurre en customer.subscription.deleted
                 }
@@ -274,13 +305,14 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
             case 'customer.subscription.deleted': {
                 const sub = event.data.object;
                 const user = await User.findOne({ where: { stripe_customer_id: sub.customer } });
-                if (user) {
-                    await user.update({
+                const target = await resolvePlanTargetUser(user);
+                if (target) {
+                    await target.update({
                         plan: 'free',
                         plan_expires_at: null,
                         stripe_subscription_id: null
                     });
-                    console.log(`ℹ️ Plan degradado a free: user ${user.id}`);
+                    console.log(`ℹ️ Plan degradado a free: user ${target.id}`);
                 }
                 break;
             }
@@ -289,9 +321,10 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
             case 'customer.subscription.updated': {
                 const sub = event.data.object;
                 const user = await User.findOne({ where: { stripe_customer_id: sub.customer } });
-                if (user && sub.status === 'active') {
+                const target = await resolvePlanTargetUser(user);
+                if (target && sub.status === 'active') {
                     const expiresAt = new Date(sub.current_period_end * 1000);
-                    await user.update({ plan: 'premium', plan_expires_at: expiresAt });
+                    await target.update({ plan: 'premium', plan_expires_at: expiresAt });
                 }
                 break;
             }
