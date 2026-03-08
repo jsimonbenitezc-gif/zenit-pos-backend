@@ -131,10 +131,24 @@ const runMigrations = async () => {
             }
         }
     };
-    await safeAdd('orders',    'branch_id',      { type: DataTypes.INTEGER, allowNull: true });
-    await safeAdd('users',     'branch_id',      { type: DataTypes.INTEGER, allowNull: true });
-    await safeAdd('customers', 'loyalty_points', { type: DataTypes.INTEGER, defaultValue: 0 });
-    await safeAdd('customers', 'in_loyalty',     { type: DataTypes.BOOLEAN, defaultValue: false });
+    await safeAdd('orders',    'branch_id',           { type: DataTypes.INTEGER, allowNull: true });
+    await safeAdd('users',     'branch_id',           { type: DataTypes.INTEGER, allowNull: true });
+    await safeAdd('customers', 'loyalty_points',      { type: DataTypes.INTEGER, defaultValue: 0 });
+    await safeAdd('customers', 'in_loyalty',          { type: DataTypes.BOOLEAN, defaultValue: false });
+    // Suscripción
+    await safeAdd('users',     'plan_expires_at',     { type: DataTypes.DATE,    allowNull: true });
+    await safeAdd('users',     'stripe_customer_id',  { type: DataTypes.STRING,  allowNull: true });
+    await safeAdd('users',     'stripe_subscription_id', { type: DataTypes.STRING, allowNull: true });
+    // plan ENUM — se maneja con SQL directo para compatibilidad con PostgreSQL
+    try {
+        await sequelize.query(`DO $$ BEGIN
+            CREATE TYPE enum_users_plan AS ENUM ('free', 'trial', 'premium');
+        EXCEPTION WHEN duplicate_object THEN NULL; END $$`);
+        await sequelize.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS plan enum_users_plan DEFAULT 'free'`);
+        console.log('✅ Added column users.plan');
+    } catch (err) {
+        if (!err.message.includes('already exists')) console.error('❌ Migration users.plan:', err.message);
+    }
 
     // Limpiar categorías duplicadas (creadas por clonación accidental de sucursales)
     // Conserva solo la de menor ID por cada combinación business_id + nombre

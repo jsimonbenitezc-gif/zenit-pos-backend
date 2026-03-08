@@ -10,6 +10,10 @@ const {
     sequelize
 } = require('../models');
 const { authenticate, isOwner } = require('../middleware/auth');
+const { requirePremium } = require('../middleware/checkPlan');
+
+// Todas las rutas de inventario requieren plan premium
+router.use(authenticate, requirePremium);
 
 // ============================================
 // INSUMOS (INGREDIENTS)

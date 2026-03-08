@@ -42,6 +42,23 @@ const User = sequelize.define('User', {
     branch_id: {
         type: DataTypes.INTEGER,
         allowNull: true
+    },
+    // Suscripción
+    plan: {
+        type: DataTypes.ENUM('free', 'trial', 'premium'),
+        defaultValue: 'free'
+    },
+    plan_expires_at: {
+        type: DataTypes.DATE,
+        allowNull: true
+    },
+    stripe_customer_id: {
+        type: DataTypes.STRING,
+        allowNull: true
+    },
+    stripe_subscription_id: {
+        type: DataTypes.STRING,
+        allowNull: true
     }
 }, {
     tableName: 'users',

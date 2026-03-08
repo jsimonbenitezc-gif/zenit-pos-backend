@@ -53,7 +53,9 @@ router.post('/login', loginLimiter, async (req, res) => {
                 username: user.username,
                 role: user.role,
                 business_id: user.id,
-                branch_id: user.branch_id || null
+                branch_id: user.branch_id || null,
+                plan: user.plan || 'free',
+                plan_expires_at: user.plan_expires_at || null
             },
             process.env.JWT_SECRET,
             { expiresIn: '30d' }
@@ -65,7 +67,9 @@ router.post('/login', loginLimiter, async (req, res) => {
                 id: user.id,
                 username: user.username,
                 name: user.name,
-                role: user.role
+                role: user.role,
+                plan: user.plan || 'free',
+                plan_expires_at: user.plan_expires_at || null
             }
         });
     } catch (error) {

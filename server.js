@@ -25,6 +25,9 @@ app.use(cors({
     },
     credentials: true
 }));
+// Billing (Stripe webhook necesita body sin parsear — DEBE ir antes de express.json)
+app.use('/api/billing', require('./routes/billing'));
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -36,11 +39,38 @@ app.use((req, res, next) => {
 
 // Routes
 app.get('/', (req, res) => {
-    res.json({ 
+    res.json({
         message: 'Zenit POS API',
         version: '1.0.0',
         status: 'running'
     });
+});
+
+// Páginas de retorno de Stripe Checkout (el navegador redirige aquí tras el pago)
+app.get('/billing-success', (req, res) => {
+    res.send(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Pago exitoso</title>
+    <style>body{font-family:sans-serif;text-align:center;padding:60px;background:#f0fdf4;}
+    h1{color:#16a34a;}p{color:#374151;}</style></head>
+    <body><h1>¡Pago completado!</h1>
+    <p>Tu plan Premium ya está activo.<br>Puedes cerrar esta ventana y volver a Zenit POS.</p>
+    </body></html>`);
+});
+
+app.get('/billing-cancel', (req, res) => {
+    res.send(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Pago cancelado</title>
+    <style>body{font-family:sans-serif;text-align:center;padding:60px;background:#fafafa;}
+    h1{color:#6b7280;}p{color:#374151;}</style></head>
+    <body><h1>Pago cancelado</h1>
+    <p>No se realizó ningún cargo.<br>Puedes cerrar esta ventana y volver a Zenit POS.</p>
+    </body></html>`);
+});
+
+app.get('/billing-return', (req, res) => {
+    res.send(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Portal de facturación</title>
+    <style>body{font-family:sans-serif;text-align:center;padding:60px;background:#fafafa;}
+    h1{color:#374151;}</style></head>
+    <body><h1>Listo</h1><p>Puedes cerrar esta ventana y volver a Zenit POS.</p>
+    </body></html>`);
 });
 
 // API Routes

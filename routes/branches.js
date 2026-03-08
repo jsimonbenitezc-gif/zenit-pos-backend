@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { Branch, Category, Discount, Combo, ComboItem, Ingredient } = require('../models');
 const { authenticate, isOwner } = require('../middleware/auth');
+const { requirePremium } = require('../middleware/checkPlan');
 
 // GET /api/branches — lista sucursales del negocio
 router.get('/', authenticate, async (req, res) => {
@@ -29,7 +30,7 @@ router.get('/', authenticate, async (req, res) => {
 
 // POST /api/branches — crear sucursal (solo dueño)
 // Body: { name, address, phone, clone_options: ['categories','discounts','combos','ingredients'] }
-router.post('/', authenticate, isOwner, async (req, res) => {
+router.post('/', authenticate, requirePremium, isOwner, async (req, res) => {
     try {
         const biz = req.user.business_id;
         const { name, address, phone, clone_options } = req.body;
@@ -95,7 +96,7 @@ router.post('/', authenticate, isOwner, async (req, res) => {
 });
 
 // PUT /api/branches/:id — editar sucursal
-router.put('/:id', authenticate, isOwner, async (req, res) => {
+router.put('/:id', authenticate, requirePremium, isOwner, async (req, res) => {
     try {
         const biz = req.user.business_id;
         const branch = await Branch.findOne({ where: { id: req.params.id, business_id: biz, active: true } });
@@ -111,7 +112,7 @@ router.put('/:id', authenticate, isOwner, async (req, res) => {
 });
 
 // DELETE /api/branches/:id — desactivar sucursal
-router.delete('/:id', authenticate, isOwner, async (req, res) => {
+router.delete('/:id', authenticate, requirePremium, isOwner, async (req, res) => {
     try {
         const biz = req.user.business_id;
         const branch = await Branch.findOne({ where: { id: req.params.id, business_id: biz, active: true } });

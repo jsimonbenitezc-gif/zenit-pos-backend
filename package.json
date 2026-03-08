@@ -15,7 +15,8 @@
     "express-rate-limit": "^8.2.1",
     "jsonwebtoken": "^9.0.2",
     "pg": "^8.11.3",
-    "sequelize": "^6.35.0"
+    "sequelize": "^6.35.0",
+    "stripe": "^20.4.1"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"

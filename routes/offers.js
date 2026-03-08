@@ -3,6 +3,10 @@ const router = express.Router();
 const { Discount, Combo, ComboItem, Product, Category, sequelize } = require('../models');
 const { Op } = require('sequelize');
 const { authenticate, isOwner } = require('../middleware/auth');
+const { requirePremium } = require('../middleware/checkPlan');
+
+// Todas las rutas de ofertas requieren plan premium
+router.use(authenticate, requirePremium);
 
 // ============================================
 // DESCUENTOS
