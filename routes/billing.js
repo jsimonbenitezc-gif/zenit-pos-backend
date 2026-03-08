@@ -1,8 +1,16 @@
 const express = require('express');
 const router = express.Router();
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { authenticate } = require('../middleware/auth');
 const { User } = require('../models');
+
+// Inicialización segura de Stripe — no crashea el servidor si falta la key
+let stripe = null;
+if (process.env.STRIPE_SECRET_KEY) {
+    stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+    console.log('✅ Stripe SDK inicializado');
+} else {
+    console.error('❌ STRIPE_SECRET_KEY no configurada — funciones de pago desactivadas');
+}
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -13,6 +21,20 @@ function planInfo(user) {
     const daysLeft   = expiresAt ? Math.max(0, Math.ceil((expiresAt - now) / 86400000)) : 0;
     return { plan: user.plan, plan_expires_at: expiresAt, is_premium: isPremium, days_left: daysLeft };
 }
+
+// ─── GET /api/billing/config-check ───────────────────────────────────────────
+// Verifica que las variables de Stripe estén configuradas (solo para diagnóstico)
+router.get('/config-check', authenticate, (req, res) => {
+    res.json({
+        stripe_key_set:    !!process.env.STRIPE_SECRET_KEY,
+        price_id_set:      !!process.env.STRIPE_PRICE_ID,
+        webhook_set:       !!process.env.STRIPE_WEBHOOK_SECRET,
+        app_url_set:       !!process.env.APP_URL,
+        stripe_ready:      !!stripe,
+        price_id_value:    process.env.STRIPE_PRICE_ID || '(no configurado)',
+        app_url_value:     process.env.APP_URL || '(no configurado)',
+    });
+});
 
 // ─── GET /api/billing/status ─────────────────────────────────────────────────
 // Devuelve el estado del plan del usuario autenticado
@@ -34,9 +56,8 @@ router.get('/sync', authenticate, async (req, res) => {
         const user = await User.findByPk(req.user.id);
         if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
 
-        // Solo consultar Stripe si el usuario ya tiene un customer_id
-        // (es decir, pasó por el checkout al menos una vez)
-        if (user.stripe_customer_id) {
+        // Solo consultar Stripe si el usuario ya tiene un customer_id y Stripe está listo
+        if (stripe && user.stripe_customer_id) {
             try {
                 let subs = await stripe.subscriptions.list({
                     customer: user.stripe_customer_id,
@@ -100,6 +121,8 @@ router.post('/start-trial', authenticate, async (req, res) => {
 // ─── POST /api/billing/create-checkout ──────────────────────────────────────
 // Crea una sesión de Stripe Checkout y devuelve la URL
 router.post('/create-checkout', authenticate, async (req, res) => {
+    if (!stripe) return res.status(503).json({ error: 'Stripe no está configurado en el servidor. Contacta al administrador.' });
+    if (!process.env.STRIPE_PRICE_ID) return res.status(503).json({ error: 'STRIPE_PRICE_ID no configurado en el servidor.' });
     try {
         const user = await User.findByPk(req.user.id);
         if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
