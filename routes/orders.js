@@ -118,10 +118,37 @@ router.post('/', authenticate, async (req, res) => {
             return res.status(400).json({ error: 'El pedido debe tener al menos un producto' });
         }
 
+        // Calcular total en el servidor (no confiar en el cliente)
+        // y validar que cada producto pertenezca al negocio
+        let calculatedTotal = 0;
+        const resolvedItems = [];
+
+        for (const item of items) {
+            const productId = item.product_id || item.id;
+            const product = await Product.findOne({
+                where: { id: productId, business_id: biz },
+                transaction: t
+            });
+
+            if (!product) {
+                await t.rollback();
+                return res.status(404).json({ error: `Producto ${productId} no encontrado en este negocio` });
+            }
+
+            const qty = Math.max(1, parseInt(item.quantity) || 1);
+            const unitPrice = parseFloat(product.price);
+            const subtotal = parseFloat((qty * unitPrice).toFixed(2));
+            calculatedTotal += subtotal;
+
+            resolvedItems.push({ product, qty, unitPrice, subtotal, notes: item.notes || item.nota || '' });
+        }
+
+        calculatedTotal = parseFloat(calculatedTotal.toFixed(2));
+
         const order = await Order.create({
             customer_id,
             customer_temp_info,
-            total,
+            total: calculatedTotal,
             status: 'registrado',
             payment_method: payment_method || 'efectivo',
             order_type: order_type || 'comer',
@@ -133,25 +160,18 @@ router.post('/', authenticate, async (req, res) => {
             branch_id: branch_id || null
         }, { transaction: t });
 
-        for (const item of items) {
-            const product = await Product.findByPk(item.product_id || item.id, { transaction: t });
-
-            if (!product) {
-                await t.rollback();
-                return res.status(404).json({ error: `Producto ${item.product_id || item.id} no encontrado` });
-            }
-
+        for (const { product, qty, unitPrice, subtotal, notes: itemNotes } of resolvedItems) {
             await OrderItem.create({
                 order_id: order.id,
                 product_id: product.id,
-                quantity: item.quantity || 1,
-                unit_price: item.unit_price || item.precio || product.price,
-                subtotal: item.subtotal || (item.quantity || 1) * (item.unit_price || item.precio || product.price),
-                notes: item.notes || item.nota || ''
+                quantity: qty,
+                unit_price: unitPrice,
+                subtotal,
+                notes: itemNotes
             }, { transaction: t });
 
             await product.update({
-                stock: product.stock - (item.quantity || 1)
+                stock: product.stock - qty
             }, { transaction: t });
         }
 
