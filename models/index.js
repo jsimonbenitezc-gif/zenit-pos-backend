@@ -107,6 +107,8 @@ const runMigrations = async () => {
         `UPDATE discounts  SET active = TRUE WHERE active IS NULL`,
         `UPDATE combos     SET active = TRUE WHERE active IS NULL`,
         `ALTER TABLE users ADD COLUMN IF NOT EXISTS business_id INTEGER REFERENCES users(id)`,
+        // Asegurar que el valor 'premium' existe en el ENUM aunque fue creado antes de añadirlo
+        `ALTER TYPE enum_users_plan ADD VALUE IF NOT EXISTS 'premium'`,
     ];
 
     for (const sql of sqlMigrations) {

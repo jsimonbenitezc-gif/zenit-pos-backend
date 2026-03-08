@@ -43,12 +43,20 @@ router.get('/sync', authenticate, async (req, res) => {
             user.stripe_customer_id = customer.id;
         }
 
-        // Buscar suscripción activa en Stripe
-        const subs = await stripe.subscriptions.list({
+        // Buscar suscripción activa o en prueba en Stripe
+        let subs = await stripe.subscriptions.list({
             customer: user.stripe_customer_id,
             status: 'active',
             limit: 1
         });
+        if (subs.data.length === 0) {
+            subs = await stripe.subscriptions.list({
+                customer: user.stripe_customer_id,
+                status: 'trialing',
+                limit: 1
+            });
+        }
+        console.log(`ℹ️ billing/sync user ${user.id}: stripe_customer_id=${user.stripe_customer_id}, subs_found=${subs.data.length}`);
 
         if (subs.data.length > 0) {
             const sub = subs.data[0];
