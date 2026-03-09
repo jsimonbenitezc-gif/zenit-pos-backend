@@ -114,7 +114,8 @@ router.post('/', authenticate, async (req, res) => {
             table_id, guests,
         } = req.body;
 
-        if (!items || items.length === 0) {
+        // Permitir pedido vacío cuando viene con table_id (mesa reservada, los items se agregan después)
+        if ((!items || items.length === 0) && !table_id) {
             await t.rollback();
             return res.status(400).json({ error: 'El pedido debe tener al menos un producto' });
         }
@@ -275,6 +276,57 @@ router.post('/:id/items', authenticate, async (req, res) => {
     } catch (error) {
         await t.rollback();
         console.error('Add items to order error:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// DELETE /api/orders/:id/items/:itemId — eliminar un producto de un pedido abierto
+router.delete('/:id/items/:itemId', authenticate, async (req, res) => {
+    const t = await sequelize.transaction();
+    try {
+        const biz = req.user.business_id;
+
+        const order = await Order.findOne({
+            where: { id: req.params.id, business_id: biz, status: 'registrado' },
+            transaction: t,
+        });
+        if (!order) {
+            await t.rollback();
+            return res.status(404).json({ error: 'Pedido no encontrado o ya cerrado' });
+        }
+
+        const item = await OrderItem.findOne({
+            where: { id: req.params.itemId, order_id: order.id },
+            transaction: t,
+        });
+        if (!item) {
+            await t.rollback();
+            return res.status(404).json({ error: 'Item no encontrado' });
+        }
+
+        // Restaurar stock
+        const product = await Product.findByPk(item.product_id, { transaction: t });
+        if (product) {
+            await product.update({ stock: product.stock + item.quantity }, { transaction: t });
+        }
+
+        await item.destroy({ transaction: t });
+
+        const newTotal = parseFloat((parseFloat(order.total) - parseFloat(item.subtotal)).toFixed(2));
+        await order.update({ total: Math.max(0, newTotal) }, { transaction: t });
+
+        await t.commit();
+
+        const updated = await Order.findByPk(order.id, {
+            include: [{
+                model: OrderItem, as: 'items',
+                include: [{ model: Product, as: 'product', attributes: ['id', 'name', 'emoji', 'price'] }],
+            }],
+        });
+        res.json(updated);
+    } catch (error) {
+        await t.rollback();
+        console.error('Delete order item error:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
