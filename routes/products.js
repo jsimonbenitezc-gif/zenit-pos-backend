@@ -52,35 +52,35 @@ router.get('/grouped', authenticate, async (req, res) => {
 
         const result = categories.map(cat => ({
             id: cat.id,
-            nombre: cat.name,
+            name: cat.name,
             emoji: cat.emoji,
             image: cat.image,
-            productos: cat.products.map(p => ({
+            products: cat.products.map(p => ({
                 id: p.id,
-                nombre: p.name,
-                descripcion: p.description,
-                precio: parseFloat(p.price),
+                name: p.name,
+                description: p.description,
+                price: parseFloat(p.price),
                 stock: p.stock,
                 emoji: p.emoji,
-                imagen: p.image,
-                activo: p.active
+                image: p.image,
+                active: p.active
             }))
         }));
 
         if (uncategorized.length > 0) {
             result.push({
                 id: null,
-                nombre: 'Sin categoría',
+                name: 'Sin categoría',
                 emoji: '📦',
-                productos: uncategorized.map(p => ({
+                products: uncategorized.map(p => ({
                     id: p.id,
-                    nombre: p.name,
-                    descripcion: p.description,
-                    precio: parseFloat(p.price),
+                    name: p.name,
+                    description: p.description,
+                    price: parseFloat(p.price),
                     stock: p.stock,
                     emoji: p.emoji,
-                    imagen: p.image,
-                    activo: p.active
+                    image: p.image,
+                    active: p.active
                 }))
             });
         }
