@@ -110,12 +110,25 @@ router.post('/', authenticate, async (req, res) => {
         const {
             customer_id, customer_temp_info, items, total,
             payment_method, order_type, reference,
-            delivery_address, maps_link, notes, branch_id
+            delivery_address, maps_link, notes, branch_id,
+            table_id, guests,
         } = req.body;
 
         if (!items || items.length === 0) {
             await t.rollback();
             return res.status(400).json({ error: 'El pedido debe tener al menos un producto' });
+        }
+
+        // Si viene table_id, verificar que la mesa no tenga ya un pedido abierto
+        if (table_id) {
+            const mesaOcupada = await Order.findOne({
+                where: { table_id, status: 'registrado', business_id: biz },
+                transaction: t,
+            });
+            if (mesaOcupada) {
+                await t.rollback();
+                return res.status(409).json({ error: 'La mesa ya tiene un pedido abierto' });
+            }
         }
 
         // Calcular total en el servidor (no confiar en el cliente)
@@ -157,7 +170,9 @@ router.post('/', authenticate, async (req, res) => {
             maps_link,
             notes,
             business_id: biz,
-            branch_id: branch_id || null
+            branch_id: branch_id || null,
+            table_id: table_id || null,
+            guests: guests ? parseInt(guests) : null,
         }, { transaction: t });
 
         for (const { product, qty, unitPrice, subtotal, notes: itemNotes } of resolvedItems) {
@@ -192,6 +207,74 @@ router.post('/', authenticate, async (req, res) => {
     } catch (error) {
         await t.rollback();
         console.error('Create order error:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// POST /api/orders/:id/items  — agregar productos a un pedido abierto (para mesas)
+router.post('/:id/items', authenticate, async (req, res) => {
+    const t = await sequelize.transaction();
+    try {
+        const biz = req.user.business_id;
+        const { items } = req.body;
+
+        if (!items || items.length === 0) {
+            await t.rollback();
+            return res.status(400).json({ error: 'Se requiere al menos un producto' });
+        }
+
+        const order = await Order.findOne({
+            where: { id: req.params.id, business_id: biz, status: 'registrado' },
+            transaction: t,
+        });
+        if (!order) {
+            await t.rollback();
+            return res.status(404).json({ error: 'Pedido no encontrado o ya cerrado' });
+        }
+
+        let additionalTotal = 0;
+        for (const item of items) {
+            const productId = item.product_id || item.id;
+            const product = await Product.findOne({
+                where: { id: productId, business_id: biz },
+                transaction: t,
+            });
+            if (!product) {
+                await t.rollback();
+                return res.status(404).json({ error: `Producto ${productId} no encontrado` });
+            }
+            const qty = Math.max(1, parseInt(item.quantity) || 1);
+            const unitPrice = parseFloat(product.price);
+            const subtotal = parseFloat((qty * unitPrice).toFixed(2));
+            additionalTotal += subtotal;
+
+            await OrderItem.create({
+                order_id: order.id,
+                product_id: product.id,
+                quantity: qty,
+                unit_price: unitPrice,
+                subtotal,
+                notes: item.notes || '',
+            }, { transaction: t });
+
+            await product.update({ stock: product.stock - qty }, { transaction: t });
+        }
+
+        const newTotal = parseFloat((parseFloat(order.total) + additionalTotal).toFixed(2));
+        await order.update({ total: newTotal }, { transaction: t });
+
+        await t.commit();
+
+        const updated = await Order.findByPk(order.id, {
+            include: [{
+                model: OrderItem, as: 'items',
+                include: [{ model: Product, as: 'product', attributes: ['id', 'name', 'emoji', 'price'] }],
+            }],
+        });
+        res.json(updated);
+    } catch (error) {
+        await t.rollback();
+        console.error('Add items to order error:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });

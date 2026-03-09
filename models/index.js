@@ -23,6 +23,9 @@ const ComboItem = require('./ComboItem');
 // Sucursales
 const Branch = require('./Branch');
 
+// Mesas
+const Table = require('./Table');
+
 // Objeto con todos los modelos
 const models = {
     User,
@@ -39,7 +42,8 @@ const models = {
     Discount,
     Combo,
     ComboItem,
-    Branch
+    Branch,
+    Table,
 };
 
 // Definir relaciones
@@ -91,6 +95,14 @@ const setupRelations = () => {
     // Branch <-> Order
     models.Branch.hasMany(models.Order, { foreignKey: 'branch_id', as: 'orders' });
     models.Order.belongsTo(models.Branch, { foreignKey: 'branch_id', as: 'branch' });
+
+    // Table <-> Order
+    models.Table.hasMany(models.Order, { foreignKey: 'table_id', as: 'orders' });
+    models.Order.belongsTo(models.Table, { foreignKey: 'table_id', as: 'table' });
+
+    // Table <-> User (business)
+    models.User.hasMany(models.Table, { foreignKey: 'business_id', as: 'tables' });
+    models.Table.belongsTo(models.User, { foreignKey: 'business_id', as: 'business' });
 };
 
 const { DataTypes } = require('sequelize');
@@ -134,6 +146,8 @@ const runMigrations = async () => {
         }
     };
     await safeAdd('orders',    'branch_id',           { type: DataTypes.INTEGER, allowNull: true });
+    await safeAdd('orders',    'table_id',            { type: DataTypes.INTEGER, allowNull: true });
+    await safeAdd('orders',    'guests',              { type: DataTypes.INTEGER, allowNull: true });
     await safeAdd('users',     'branch_id',           { type: DataTypes.INTEGER, allowNull: true });
     await safeAdd('customers', 'loyalty_points',      { type: DataTypes.INTEGER, defaultValue: 0 });
     await safeAdd('customers', 'in_loyalty',          { type: DataTypes.BOOLEAN, defaultValue: false });
