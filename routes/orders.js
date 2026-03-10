@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { Order, OrderItem, Product, Customer, sequelize } = require('../models');
+const { Order, OrderItem, Product, Customer, Table, sequelize } = require('../models');
 const { authenticate } = require('../middleware/auth');
 const { Op } = require('sequelize');
 
@@ -35,7 +35,14 @@ router.get('/', authenticate, async (req, res) => {
                 {
                     model: Customer,
                     as: 'customer',
-                    attributes: ['id', 'name', 'phone']
+                    attributes: ['id', 'name', 'phone'],
+                    required: false
+                },
+                {
+                    model: Table,
+                    as: 'table',
+                    attributes: ['id', 'name', 'zone'],
+                    required: false
                 },
                 {
                     model: OrderItem,

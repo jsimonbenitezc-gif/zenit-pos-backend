@@ -98,6 +98,18 @@ router.get('/dashboard', authenticate, async (req, res) => {
             }
         });
 
+        // 5b. LISTA DE PRODUCTOS CON STOCK BAJO
+        const productosStockBajoLista = await Product.findAll({
+            where: {
+                business_id: biz,
+                stock: { [Op.lt]: 10 },
+                active: true
+            },
+            attributes: ['id', 'name', 'emoji', 'stock'],
+            order: [['stock', 'ASC']],
+            limit: 10
+        });
+
         // 6. CLIENTES ÚNICOS HOY
         const clientesHoy = await Order.count({
             where: {
@@ -226,7 +238,13 @@ router.get('/dashboard', authenticate, async (req, res) => {
             })),
             ultimasVentas: ultimasVentasFormateadas,
             clientesVIPHoy: clientesVIPHoy.map(c => ({ id: c.id, name: c.name, phone: c.phone })),
-            ventasPorHora
+            ventasPorHora,
+            productosStockBajoLista: productosStockBajoLista.map(p => ({
+                id: p.id,
+                name: p.name,
+                emoji: p.emoji,
+                stock: p.stock
+            }))
         });
     } catch (error) {
         console.error('Dashboard stats error:', error);

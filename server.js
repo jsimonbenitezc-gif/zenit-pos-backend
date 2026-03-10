@@ -144,7 +144,7 @@ app.get('/kds', (req, res) => {
       });
       if (!r.ok) throw new Error();
       const data = await r.json();
-      orders = Array.isArray(data) ? data : (data.orders || data.rows || []);
+      orders = Array.isArray(data) ? data : (data.data || data.orders || data.rows || []);
       document.getElementById('dot').className = 'dot';
       document.getElementById('status-text').textContent = 'Conectado · actualiza cada 15s';
       renderAll();
@@ -168,12 +168,12 @@ app.get('/kds', (req, res) => {
     const timeText  = mins < 1 ? 'Ahora mismo' : mins + ' min';
     const timeClass = mins >= 20 ? 'urgente' : mins >= 10 ? 'tarde' : '';
     const cardClass = mins >= 20 ? 'urgente' : 'nueva';
-    const table = o.Table && o.Table.name;
+    const table = (o.table && o.table.name) || (o.Table && o.Table.name);
     const tipo  = o.order_type;
     const badgeText  = table ? ('\\u{1FA91} ' + esc(table)) : (tipo === 'domicilio' ? 'Domicilio' : (tipo === 'llevar' ? 'Para llevar' : 'Mostrador'));
     const badgeClass = table ? 'badge-mesa' : (tipo === 'domicilio' ? 'badge-delivery' : 'badge-mostrador');
-    const items = (o.OrderItems || []).map(function(i) {
-      return '<div class="item"><div class="item-qty">' + (i.quantity||1) + '</div><div class="item-nombre">' + esc((i.Product && i.Product.name) || 'Producto') + '</div></div>';
+    const items = (o.items || o.OrderItems || []).map(function(i) {
+      return '<div class="item"><div class="item-qty">' + (i.quantity||1) + '</div><div class="item-nombre">' + esc((i.product && i.product.name) || (i.Product && i.Product.name) || 'Producto') + '</div></div>';
     }).join('');
     const nota = o.notes ? '<div class="card-nota">\\uD83D\\uDCDD ' + esc(o.notes) + '</div>' : '';
     return '<div class="card ' + cardClass + '" id="card-' + o.id + '">' +
