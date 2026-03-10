@@ -145,10 +145,24 @@ router.post('/change-password', authenticate, async (req, res) => {
 router.get('/me', authenticate, async (req, res) => {
     try {
         const user = await User.findByPk(req.user.id, {
-            attributes: ['id', 'name', 'username', 'role']
+            attributes: ['id', 'name', 'username', 'role', 'plan', 'plan_expires_at', 'business_id']
         });
         if (!user) return res.status(401).json({ error: 'Usuario no encontrado' });
-        res.json({ id: user.id, name: user.name, email: user.username, role: user.role });
+
+        // Si es staff, el plan pertenece al dueño (business_id)
+        let plan = user.plan || 'free';
+        let plan_expires_at = user.plan_expires_at || null;
+        if (user.business_id) {
+            const owner = await User.findByPk(user.business_id, {
+                attributes: ['plan', 'plan_expires_at']
+            });
+            if (owner) {
+                plan = owner.plan || 'free';
+                plan_expires_at = owner.plan_expires_at || null;
+            }
+        }
+
+        res.json({ id: user.id, name: user.name, email: user.username, role: user.role, plan, plan_expires_at });
     } catch (error) {
         res.status(500).json({ error: 'Error interno del servidor' });
     }

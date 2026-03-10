@@ -73,6 +73,147 @@ app.get('/billing-return', (req, res) => {
     </body></html>`);
 });
 
+// ─── GET /kds?token=<jwt>  ────────────────────────────────────────────────────
+// Página web del KDS para ver en el navegador de cualquier dispositivo.
+// Polling cada 15 s al backend usando el token JWT en la query.
+app.get('/kds', (req, res) => {
+    const { token } = req.query;
+    if (!token) return res.status(401).send('<h1>Token requerido. Escanea el QR desde la app.</h1>');
+    try {
+        require('jsonwebtoken').verify(token, process.env.JWT_SECRET);
+    } catch {
+        return res.status(401).send('<h1>Token inválido o expirado. Genera un nuevo QR desde la app.</h1>');
+    }
+
+    const safeToken = token.replace(/['"<>&]/g, '');
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(`<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cocina — Zenit KDS</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{background:#111827;color:#f9fafb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;min-height:100vh}
+    header{background:#1f2937;padding:12px 20px;display:flex;align-items:center;justify-content:space-between;border-bottom:2px solid #374151;position:sticky;top:0;z-index:10}
+    .logo{font-size:1.2em;font-weight:700}.logo span{color:#818cf8}
+    .status{display:flex;align-items:center;gap:8px;font-size:0.85em;color:#d1d5db}
+    .dot{width:10px;height:10px;border-radius:50%;background:#10b981;flex-shrink:0}
+    .dot.error{background:#ef4444}
+    .reloj{color:#9ca3af;font-size:0.9em;font-variant-numeric:tabular-nums}
+    #grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:14px;padding:16px}
+    .card{background:#1f2937;border-radius:12px;border:2px solid #374151;overflow:hidden;animation:entrar 0.25s ease}
+    .card.nueva{border-color:#818cf8}.card.urgente{border-color:#ef4444}
+    @keyframes entrar{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:translateY(0)}}
+    .card-header{background:#374151;padding:10px 14px;display:flex;align-items:center;justify-content:space-between;gap:8px}
+    .card-num{font-size:1.4em;font-weight:800}
+    .badge{padding:3px 10px;border-radius:20px;font-size:0.78em;font-weight:700}
+    .badge-mesa{background:#4f46e5;color:#fff}.badge-mostrador{background:#059669;color:#fff}.badge-delivery{background:#d97706;color:#fff}
+    .card-tiempo{font-size:0.8em;color:#9ca3af;white-space:nowrap}
+    .card-tiempo.tarde{color:#f59e0b;font-weight:600}.card-tiempo.urgente{color:#ef4444;font-weight:700}
+    .card-items{padding:10px 14px}
+    .item{display:flex;align-items:flex-start;gap:10px;padding:7px 0;border-bottom:1px solid #374151}
+    .item:last-child{border-bottom:none}
+    .item-qty{background:#4b5563;color:#f9fafb;font-weight:700;min-width:30px;height:30px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:0.95em;flex-shrink:0}
+    .item-nombre{font-weight:600;font-size:1em;line-height:1.3}
+    .card-nota{margin:0 14px 8px;padding:6px 10px;background:#2d2009;border-left:3px solid #f59e0b;border-radius:0 6px 6px 0;font-size:0.82em;color:#fcd34d}
+    .card-footer{padding:10px 14px}
+    .btn-listo{width:100%;padding:11px;border:none;border-radius:8px;font-size:0.95em;font-weight:700;cursor:pointer;color:#fff;background:#10b981;transition:background 0.15s}
+    .btn-listo:hover{background:#059669}
+    .empty{grid-column:1/-1;text-align:center;padding:80px 20px}
+    .empty p{font-size:1.2em;color:#4b5563;margin-top:12px}
+  </style>
+</head>
+<body>
+<header>
+  <div class="logo">Zenit <span>Cocina</span></div>
+  <div class="status"><div class="dot" id="dot"></div><span id="status-text">Cargando...</span></div>
+  <div class="reloj" id="reloj"></div>
+</header>
+<div id="grid"></div>
+<script>
+  const TOKEN = '${safeToken}';
+  const API   = '/api';
+  let orders  = [];
+
+  async function cargar() {
+    try {
+      const r = await fetch(API + '/orders?status=registrado&limit=100', {
+        headers: { 'Authorization': 'Bearer ' + TOKEN }
+      });
+      if (!r.ok) throw new Error();
+      const data = await r.json();
+      orders = Array.isArray(data) ? data : (data.orders || data.rows || []);
+      document.getElementById('dot').className = 'dot';
+      document.getElementById('status-text').textContent = 'Conectado · actualiza cada 15s';
+      renderAll();
+    } catch {
+      document.getElementById('dot').className = 'dot error';
+      document.getElementById('status-text').textContent = 'Sin conexión — reintentando...';
+    }
+  }
+
+  function renderAll() {
+    const grid = document.getElementById('grid');
+    if (!orders.length) {
+      grid.innerHTML = '<div class="empty"><div style="font-size:3em">✅</div><p>Todo al día — sin comandas pendientes</p></div>';
+      return;
+    }
+    grid.innerHTML = orders.map(renderCard).join('');
+  }
+
+  function renderCard(o) {
+    const mins = Math.floor((Date.now() - new Date(o.createdAt).getTime()) / 60000);
+    const timeText  = mins < 1 ? 'Ahora mismo' : mins + ' min';
+    const timeClass = mins >= 20 ? 'urgente' : mins >= 10 ? 'tarde' : '';
+    const cardClass = mins >= 20 ? 'urgente' : 'nueva';
+    const table = o.Table && o.Table.name;
+    const tipo  = o.order_type;
+    const badgeText  = table ? ('\\u{1FA91} ' + esc(table)) : (tipo === 'domicilio' ? 'Domicilio' : (tipo === 'llevar' ? 'Para llevar' : 'Mostrador'));
+    const badgeClass = table ? 'badge-mesa' : (tipo === 'domicilio' ? 'badge-delivery' : 'badge-mostrador');
+    const items = (o.OrderItems || []).map(function(i) {
+      return '<div class="item"><div class="item-qty">' + (i.quantity||1) + '</div><div class="item-nombre">' + esc((i.Product && i.Product.name) || 'Producto') + '</div></div>';
+    }).join('');
+    const nota = o.notes ? '<div class="card-nota">\\uD83D\\uDCDD ' + esc(o.notes) + '</div>' : '';
+    return '<div class="card ' + cardClass + '" id="card-' + o.id + '">' +
+      '<div class="card-header"><div class="card-num">#' + o.id + '</div><div class="badge ' + badgeClass + '">' + badgeText + '</div><div class="card-tiempo ' + timeClass + '">' + timeText + '</div></div>' +
+      '<div class="card-items">' + items + '</div>' + nota +
+      '<div class="card-footer"><button class="btn-listo" onclick="completar(' + o.id + ')">\\u2713 Completado</button></div>' +
+      '</div>';
+  }
+
+  async function completar(id) {
+    orders = orders.filter(function(o){ return o.id !== id; });
+    var card = document.getElementById('card-' + id);
+    if (card) { card.style.opacity='0'; card.style.transform='scale(0.9)'; card.style.transition='all 0.2s'; setTimeout(function(){ card.remove(); renderAll(); }, 200); }
+    try {
+      await fetch(API + '/orders/' + id + '/status', {
+        method: 'PUT',
+        headers: { 'Authorization': 'Bearer ' + TOKEN, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'completado' })
+      });
+    } catch(e) {}
+  }
+
+  function esc(s) {
+    return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  function actualizarReloj() {
+    document.getElementById('reloj').textContent = new Date().toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit'});
+  }
+
+  cargar();
+  setInterval(cargar, 15000);
+  actualizarReloj();
+  setInterval(actualizarReloj, 10000);
+  setInterval(function(){ if(orders.length) renderAll(); }, 60000);
+</script>
+</body>
+</html>`);
+});
+
 // API Routes
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/products', require('./routes/products'));
