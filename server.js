@@ -137,6 +137,10 @@ app.get('/kds', (req, res) => {
   const API   = '/api';
   let orders  = [];
 
+  // Comandas marcadas como listas en cocina (persisten mientras la página esté abierta)
+  // No cambian el status del backend — la mesa sigue activa hasta que el cajero cobra.
+  const dismissed = new Set(JSON.parse(sessionStorage.getItem('kds_ok') || '[]'));
+
   async function cargar() {
     try {
       const r = await fetch(API + '/orders?status=registrado&limit=100', {
@@ -144,7 +148,8 @@ app.get('/kds', (req, res) => {
       });
       if (!r.ok) throw new Error();
       const data = await r.json();
-      orders = Array.isArray(data) ? data : (data.data || data.orders || data.rows || []);
+      const todas = Array.isArray(data) ? data : (data.data || data.orders || data.rows || []);
+      orders = todas.filter(function(o){ return !dismissed.has(o.id); });
       document.getElementById('dot').className = 'dot';
       document.getElementById('status-text').textContent = 'Conectado · actualiza cada 15s';
       renderAll();
@@ -183,17 +188,14 @@ app.get('/kds', (req, res) => {
       '</div>';
   }
 
-  async function completar(id) {
+  function completar(id) {
+    // Marcar como lista en cocina — NO cambia el status en el backend.
+    // La mesa permanece activa hasta que el cajero procese el cobro.
+    dismissed.add(id);
+    sessionStorage.setItem('kds_ok', JSON.stringify([...dismissed]));
     orders = orders.filter(function(o){ return o.id !== id; });
     var card = document.getElementById('card-' + id);
     if (card) { card.style.opacity='0'; card.style.transform='scale(0.9)'; card.style.transition='all 0.2s'; setTimeout(function(){ card.remove(); renderAll(); }, 200); }
-    try {
-      await fetch(API + '/orders/' + id + '/status', {
-        method: 'PUT',
-        headers: { 'Authorization': 'Bearer ' + TOKEN, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'completado' })
-      });
-    } catch(e) {}
   }
 
   function esc(s) {
