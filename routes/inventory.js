@@ -269,6 +269,7 @@ router.post('/preparations/:id/recipe', authenticate, isOwner, async (req, res) 
         const costPerUnit = totalCost / parseFloat(preparation.yield_quantity);
         await preparation.update({ cost_per_unit: costPerUnit }, { transaction: t });
         await t.commit();
+        _notificarInventario(biz);
         const updatedPreparation = await Preparation.findByPk(req.params.id, {
             include: [{ model: PreparationItem, as: 'items', include: [{ model: Ingredient, as: 'ingredient' }] }]
         });
@@ -346,6 +347,7 @@ router.post('/products/:id/recipe', authenticate, isOwner, async (req, res) => {
             }, { transaction: t });
         }
         await t.commit();
+        _notificarInventario(biz);
         const recipe = await ProductRecipe.findAll({ where: { product_id: req.params.id } });
         res.json(recipe);
     } catch (error) {
