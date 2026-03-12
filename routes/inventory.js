@@ -11,6 +11,52 @@ const {
 } = require('../models');
 const { authenticate, isOwner } = require('../middleware/auth');
 const { requirePremium } = require('../middleware/checkPlan');
+const jwt = require('jsonwebtoken');
+
+// ── SSE: notificaciones en tiempo real de cambios en inventario ────────────────
+const _invClients = new Map(); // businessId (string) → Set<Response>
+
+function _notificarInventario(businessId) {
+    const clients = _invClients.get(String(businessId));
+    if (!clients || clients.size === 0) return;
+    const msg = `data: {}\n\n`;
+    for (const res of clients) {
+        try { res.write(msg); } catch { /* cliente desconectado */ }
+    }
+}
+
+// Este endpoint NO usa router.use(authenticate) porque EventSource no soporta headers.
+// Auth via query param ?token=JWT
+router.get('/events', (req, res) => {
+    const token = req.query.token;
+    if (!token) return res.status(401).end();
+    let businessId;
+    try {
+        const payload = jwt.verify(token, process.env.JWT_SECRET);
+        businessId = payload.business_id;
+    } catch {
+        return res.status(401).end();
+    }
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no'); // importante para Render.com / nginx
+    res.flushHeaders();
+
+    // Heartbeat cada 25s para evitar timeout en Render.com
+    const heartbeat = setInterval(() => {
+        try { res.write(': ping\n\n'); } catch { clearInterval(heartbeat); }
+    }, 25000);
+
+    const biz = String(businessId);
+    if (!_invClients.has(biz)) _invClients.set(biz, new Set());
+    _invClients.get(biz).add(res);
+
+    req.on('close', () => {
+        clearInterval(heartbeat);
+        _invClients.get(biz)?.delete(res);
+    });
+});
 
 // Todas las rutas de inventario requieren plan premium
 router.use(authenticate, requirePremium);
@@ -367,6 +413,7 @@ router.post('/movements', authenticate, async (req, res) => {
             await ingredient.update({ stock: quantity }, { transaction: t });
         }
         await t.commit();
+        _notificarInventario(biz); // avisar a clientes SSE conectados
         const fullMovement = await InventoryMovement.findByPk(movement.id, {
             include: [{ model: Ingredient, as: 'ingredient', attributes: ['id', 'name', 'unit', 'stock'] }]
         });
