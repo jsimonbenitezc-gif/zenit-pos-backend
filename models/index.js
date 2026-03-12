@@ -197,6 +197,21 @@ const runMigrations = async () => {
         console.error('❌ Error asignando pedidos históricos:', err.message);
     }
 
+    // Backfill business_id en movimientos de inventario que tengan NULL
+    // (creados antes de que la columna fuera obligatoria)
+    try {
+        await sequelize.query(`
+            UPDATE inventory_movements im
+            SET business_id = (
+                SELECT i.business_id FROM ingredients i WHERE i.id = im.ingredient_id
+            )
+            WHERE im.business_id IS NULL
+        `);
+        console.log('✅ inventory_movements.business_id backfill completado');
+    } catch (err) {
+        console.error('❌ Error en backfill de inventory_movements.business_id:', err.message);
+    }
+
     console.log('✅ Migrations applied');
 };
 

@@ -197,6 +197,7 @@ router.post('/preparations', authenticate, isOwner, async (req, res) => {
             return res.status(400).json({ error: 'Nombre, unidad y rendimiento son requeridos' });
         }
         const preparation = await Preparation.create({ name, unit, yield_quantity, notes, business_id: biz });
+        _notificarInventario(biz);
         res.status(201).json(preparation);
     } catch (error) {
         res.status(500).json({ error: 'Error interno del servidor' });
@@ -352,6 +353,19 @@ router.post('/products/:id/recipe', authenticate, isOwner, async (req, res) => {
         res.json(recipe);
     } catch (error) {
         await t.rollback();
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+router.delete('/products/:id/recipe', authenticate, isOwner, async (req, res) => {
+    try {
+        const biz = req.user.business_id;
+        const product = await Product.findOne({ where: { id: req.params.id, business_id: biz } });
+        if (!product) return res.status(404).json({ error: 'Producto no encontrado' });
+        await ProductRecipe.destroy({ where: { product_id: req.params.id } });
+        _notificarInventario(biz);
+        res.json({ message: 'Receta eliminada' });
+    } catch (error) {
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
