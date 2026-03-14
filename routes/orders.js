@@ -1,8 +1,55 @@
 const express = require('express');
 const router = express.Router();
-const { Order, OrderItem, Product, Customer, Table, sequelize } = require('../models');
+const { Order, OrderItem, Product, Customer, Table, ProductRecipe, Ingredient, PreparationItem, sequelize } = require('../models');
 const { authenticate } = require('../middleware/auth');
 const { Op } = require('sequelize');
+
+// Factores de conversión entre unidades compatibles
+const FACTORES_CONVERSION = {
+    'g_kg': 0.001, 'kg_g': 1000,
+    'ml_l': 0.001, 'l_ml': 1000,
+    'ml_gal': 0.000264, 'gal_ml': 3785.41,
+    'l_gal': 0.26417, 'gal_l': 3.78541,
+};
+
+function convertirUnidad(cantidad, unidadReceta, ingrediente) {
+    if (!unidadReceta || unidadReceta === ingrediente.unit) return cantidad;
+    const clave = `${unidadReceta}_${ingrediente.unit}`;
+    if (FACTORES_CONVERSION[clave]) return cantidad * FACTORES_CONVERSION[clave];
+    return cantidad;
+}
+
+// Descuenta ingredientes según la receta del producto al registrar una venta
+async function descontarIngredientesDeReceta(productId, qty, t) {
+    const recetaItems = await ProductRecipe.findAll({ where: { product_id: productId }, transaction: t });
+    if (!recetaItems.length) return;
+
+    for (const item of recetaItems) {
+        if (item.item_type === 'ingredient') {
+            const ingrediente = await Ingredient.findByPk(item.item_id, { transaction: t });
+            if (!ingrediente) continue;
+            const cantDescontar = convertirUnidad(parseFloat(item.quantity), item.unit_recipe, ingrediente) * qty;
+            await ingrediente.update({
+                stock: Math.max(0, parseFloat(ingrediente.stock) - cantDescontar)
+            }, { transaction: t });
+
+        } else if (item.item_type === 'preparation') {
+            const prepItems = await PreparationItem.findAll({
+                where: { preparation_id: item.item_id },
+                include: [{ model: Ingredient, as: 'ingredient' }],
+                transaction: t
+            });
+            const cantPrep = parseFloat(item.quantity) * qty;
+            for (const pi of prepItems) {
+                if (!pi.ingredient) continue;
+                const cantDescontar = convertirUnidad(parseFloat(pi.quantity), pi.unit_recipe, pi.ingredient) * cantPrep;
+                await pi.ingredient.update({
+                    stock: Math.max(0, parseFloat(pi.ingredient.stock) - cantDescontar)
+                }, { transaction: t });
+            }
+        }
+    }
+}
 
 // GET /api/orders
 router.get('/', authenticate, async (req, res) => {
@@ -196,6 +243,8 @@ router.post('/', authenticate, async (req, res) => {
             await product.update({
                 stock: product.stock - qty
             }, { transaction: t });
+
+            await descontarIngredientesDeReceta(product.id, qty, t);
         }
 
         await t.commit();
@@ -266,6 +315,7 @@ router.post('/:id/items', authenticate, async (req, res) => {
             }, { transaction: t });
 
             await product.update({ stock: product.stock - qty }, { transaction: t });
+            await descontarIngredientesDeReceta(product.id, qty, t);
         }
 
         const newTotal = parseFloat((parseFloat(order.total) + additionalTotal).toFixed(2));

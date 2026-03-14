@@ -13,6 +13,19 @@ const { authenticate, isOwner } = require('../middleware/auth');
 const { requirePremium } = require('../middleware/checkPlan');
 const jwt = require('jsonwebtoken');
 
+const UNIT_CONVERSION = {
+    'kg_g': 1000,
+    'g_kg': 0.001,
+    'l_ml': 1000,
+    'ml_l': 0.001,
+};
+
+function convertUnit(qty, fromUnit, toUnit) {
+    if (!fromUnit || !toUnit || fromUnit === toUnit) return qty;
+    const key = `${fromUnit}_${toUnit}`;
+    return UNIT_CONVERSION[key] ? qty * UNIT_CONVERSION[key] : qty;
+}
+
 // ── SSE: notificaciones en tiempo real de cambios en inventario ────────────────
 const _invClients = new Map(); // businessId (string) → Set<Response>
 
@@ -159,6 +172,7 @@ router.get('/preparations', authenticate, async (req, res) => {
             include: [{
                 model: PreparationItem,
                 as: 'items',
+                attributes: ['id', 'preparation_id', 'ingredient_id', 'quantity', 'unit_recipe'],
                 include: [{ model: Ingredient, as: 'ingredient', attributes: ['id', 'name', 'unit'] }]
             }],
             order: [['name', 'ASC']]
@@ -260,11 +274,13 @@ router.post('/preparations/:id/recipe', authenticate, isOwner, async (req, res) 
             await PreparationItem.create({
                 preparation_id: req.params.id,
                 ingredient_id: item.ingredient_id,
-                quantity: item.quantity
+                quantity: item.quantity,
+                unit_recipe: item.unit_recipe || null
             }, { transaction: t });
             const ingredient = await Ingredient.findByPk(item.ingredient_id, { transaction: t });
             if (ingredient) {
-                totalCost += parseFloat(ingredient.cost_per_unit) * parseFloat(item.quantity);
+                const qtyConv = convertUnit(parseFloat(item.quantity), item.unit_recipe, ingredient.unit);
+                totalCost += parseFloat(ingredient.cost_per_unit) * qtyConv;
             }
         }
         const costPerUnit = totalCost / parseFloat(preparation.yield_quantity);
@@ -344,7 +360,8 @@ router.post('/products/:id/recipe', authenticate, isOwner, async (req, res) => {
                 product_id: req.params.id,
                 item_type: item.item_type,
                 item_id: item.item_id,
-                quantity: item.quantity
+                quantity: item.quantity,
+                unit_recipe: item.unit_recipe || null
             }, { transaction: t });
         }
         await t.commit();

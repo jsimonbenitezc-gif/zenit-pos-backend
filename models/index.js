@@ -151,6 +151,8 @@ const runMigrations = async () => {
     await safeAdd('users',     'branch_id',           { type: DataTypes.INTEGER, allowNull: true });
     await safeAdd('customers', 'loyalty_points',      { type: DataTypes.INTEGER, defaultValue: 0 });
     await safeAdd('customers', 'in_loyalty',          { type: DataTypes.BOOLEAN, defaultValue: false });
+    await safeAdd('preparation_items', 'unit_recipe', { type: DataTypes.STRING,  allowNull: true });
+    await safeAdd('product_recipes',   'unit_recipe', { type: DataTypes.STRING,  allowNull: true });
     // Suscripción
     await safeAdd('users',     'plan_expires_at',     { type: DataTypes.DATE,    allowNull: true });
     await safeAdd('users',     'stripe_customer_id',  { type: DataTypes.STRING,  allowNull: true });

@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { Order, OrderItem, Product, Customer, sequelize } = require('../models');
+const { Order, OrderItem, Product, Customer, Ingredient, sequelize } = require('../models');
 const { authenticate } = require('../middleware/auth');
 const { Op } = require('sequelize');
 
@@ -89,23 +89,25 @@ router.get('/dashboard', authenticate, async (req, res) => {
             raw: true
         });
 
-        // 5. PRODUCTOS CON STOCK BAJO (menos de 10)
-        const productosStockBajo = await Product.count({
+        // 5. INSUMOS CON STOCK BAJO (stock < min_stock y min_stock > 0)
+        const productosStockBajo = await Ingredient.count({
             where: {
                 business_id: biz,
-                stock: { [Op.lt]: 10 },
-                active: true
+                active: true,
+                min_stock: { [Op.gt]: 0 },
+                [Op.and]: sequelize.where(sequelize.col('stock'), Op.lt, sequelize.col('min_stock'))
             }
         });
 
-        // 5b. LISTA DE PRODUCTOS CON STOCK BAJO
-        const productosStockBajoLista = await Product.findAll({
+        // 5b. LISTA DE INSUMOS CON STOCK BAJO
+        const productosStockBajoLista = await Ingredient.findAll({
             where: {
                 business_id: biz,
-                stock: { [Op.lt]: 10 },
-                active: true
+                active: true,
+                min_stock: { [Op.gt]: 0 },
+                [Op.and]: sequelize.where(sequelize.col('stock'), Op.lt, sequelize.col('min_stock'))
             },
-            attributes: ['id', 'name', 'emoji', 'stock'],
+            attributes: ['id', 'name', 'stock', 'min_stock'],
             order: [['stock', 'ASC']],
             limit: 10
         });
@@ -242,7 +244,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
             productosStockBajoLista: productosStockBajoLista.map(p => ({
                 id: p.id,
                 name: p.name,
-                emoji: p.emoji,
+                emoji: '',
                 stock: p.stock
             }))
         });
