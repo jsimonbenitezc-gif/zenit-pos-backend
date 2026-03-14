@@ -26,6 +26,10 @@ const PreparationItem = sequelize.define('PreparationItem', {
     quantity: {
         type: DataTypes.DECIMAL(10, 3),
         allowNull: false
+    },
+    unit_recipe: {
+        type: DataTypes.STRING,
+        allowNull: true
     }
 }, {
     tableName: 'preparation_items',
