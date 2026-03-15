@@ -26,6 +26,9 @@ const Branch = require('./Branch');
 // Mesas
 const Table = require('./Table');
 
+// Turnos
+const Turno = require('./Turno');
+
 // Objeto con todos los modelos
 const models = {
     User,
@@ -44,6 +47,7 @@ const models = {
     ComboItem,
     Branch,
     Table,
+    Turno,
 };
 
 // Definir relaciones
@@ -153,6 +157,12 @@ const runMigrations = async () => {
     await safeAdd('customers', 'in_loyalty',          { type: DataTypes.BOOLEAN, defaultValue: false });
     await safeAdd('preparation_items', 'unit_recipe', { type: DataTypes.STRING,  allowNull: true });
     await safeAdd('product_recipes',   'unit_recipe', { type: DataTypes.STRING,  allowNull: true });
+    // Turnos
+    await safeAdd('turnos', 'branch_id',           { type: DataTypes.INTEGER,       allowNull: true });
+    await safeAdd('turnos', 'rol',                 { type: DataTypes.STRING,        allowNull: true });
+    await safeAdd('turnos', 'notas',               { type: DataTypes.TEXT,          allowNull: true });
+    await safeAdd('turnos', 'total_tarjeta',       { type: DataTypes.DECIMAL(10,2), defaultValue: 0 });
+    await safeAdd('turnos', 'total_transferencia', { type: DataTypes.DECIMAL(10,2), defaultValue: 0 });
     // Suscripción
     await safeAdd('users',     'plan_expires_at',     { type: DataTypes.DATE,    allowNull: true });
     await safeAdd('users',     'stripe_customer_id',  { type: DataTypes.STRING,  allowNull: true });
