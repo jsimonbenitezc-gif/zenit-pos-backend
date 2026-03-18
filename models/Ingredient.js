@@ -39,6 +39,18 @@ const Ingredient = sequelize.define('Ingredient', {
     business_id: {
         type: DataTypes.INTEGER,
         allowNull: true
+    },
+    branch_stocks: {
+        type: DataTypes.TEXT,
+        allowNull: true,
+        get() {
+            const raw = this.getDataValue('branch_stocks');
+            if (!raw) return {};
+            try { return JSON.parse(raw); } catch { return {}; }
+        },
+        set(val) {
+            this.setDataValue('branch_stocks', val ? JSON.stringify(val) : null);
+        }
     }
 }, {
     tableName: 'ingredients',

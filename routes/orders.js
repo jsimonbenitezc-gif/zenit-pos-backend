@@ -19,8 +19,27 @@ function convertirUnidad(cantidad, unidadReceta, ingrediente) {
     return cantidad;
 }
 
+// Helpers de stock por sucursal
+function getBranchStock(ingredient, branchId) {
+    if (!branchId) return parseFloat(ingredient.stock);
+    const bs = ingredient.branch_stocks || {};
+    const key = String(branchId);
+    // Cada sucursal tiene stock independiente. Si no tiene entrada propia, su stock es 0.
+    return key in bs ? parseFloat(bs[key]) : 0;
+}
+
+async function setBranchStock(ingredient, branchId, newStock, transaction) {
+    if (!branchId) {
+        await ingredient.update({ stock: newStock }, { transaction });
+    } else {
+        const bs = { ...(ingredient.branch_stocks || {}) };
+        bs[String(branchId)] = newStock;
+        await ingredient.update({ branch_stocks: bs }, { transaction });
+    }
+}
+
 // Descuenta ingredientes según la receta del producto al registrar una venta
-async function descontarIngredientesDeReceta(productId, qty, t) {
+async function descontarIngredientesDeReceta(productId, qty, t, branchId = null) {
     const recetaItems = await ProductRecipe.findAll({ where: { product_id: productId }, transaction: t });
     if (!recetaItems.length) return;
 
@@ -29,9 +48,8 @@ async function descontarIngredientesDeReceta(productId, qty, t) {
             const ingrediente = await Ingredient.findByPk(item.item_id, { transaction: t });
             if (!ingrediente) continue;
             const cantDescontar = convertirUnidad(parseFloat(item.quantity), item.unit_recipe, ingrediente) * qty;
-            await ingrediente.update({
-                stock: Math.max(0, parseFloat(ingrediente.stock) - cantDescontar)
-            }, { transaction: t });
+            const stockActual = getBranchStock(ingrediente, branchId);
+            await setBranchStock(ingrediente, branchId, Math.max(0, stockActual - cantDescontar), t);
 
         } else if (item.item_type === 'preparation') {
             const prepItems = await PreparationItem.findAll({
@@ -43,9 +61,8 @@ async function descontarIngredientesDeReceta(productId, qty, t) {
             for (const pi of prepItems) {
                 if (!pi.ingredient) continue;
                 const cantDescontar = convertirUnidad(parseFloat(pi.quantity), pi.unit_recipe, pi.ingredient) * cantPrep;
-                await pi.ingredient.update({
-                    stock: Math.max(0, parseFloat(pi.ingredient.stock) - cantDescontar)
-                }, { transaction: t });
+                const stockActual = getBranchStock(pi.ingredient, branchId);
+                await setBranchStock(pi.ingredient, branchId, Math.max(0, stockActual - cantDescontar), t);
             }
         }
     }
@@ -244,7 +261,7 @@ router.post('/', authenticate, async (req, res) => {
                 stock: product.stock - qty
             }, { transaction: t });
 
-            await descontarIngredientesDeReceta(product.id, qty, t);
+            await descontarIngredientesDeReceta(product.id, qty, t, branch_id || null);
         }
 
         await t.commit();
@@ -315,7 +332,7 @@ router.post('/:id/items', authenticate, async (req, res) => {
             }, { transaction: t });
 
             await product.update({ stock: product.stock - qty }, { transaction: t });
-            await descontarIngredientesDeReceta(product.id, qty, t);
+            await descontarIngredientesDeReceta(product.id, qty, t, order.branch_id || null);
         }
 
         const newTotal = parseFloat((parseFloat(order.total) + additionalTotal).toFixed(2));

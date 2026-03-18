@@ -81,10 +81,21 @@ router.use(authenticate, requirePremium);
 router.get('/ingredients', authenticate, async (req, res) => {
     try {
         const biz = req.user.business_id;
+        const branchId = req.query.branch_id ? String(req.query.branch_id) : null;
         const ingredients = await Ingredient.findAll({
             where: { active: true, business_id: biz },
             order: [['name', 'ASC']]
         });
+        if (branchId) {
+            // Reemplazar stock con el valor de esta sucursal (0 si nunca se ha ajustado en esta sucursal)
+            const result = ingredients.map(ing => {
+                const plain = ing.toJSON();
+                const bs = ing.branch_stocks || {};
+                plain.stock = branchId in bs ? bs[branchId] : 0;
+                return plain;
+            });
+            return res.json(result);
+        }
         res.json(ingredients);
     } catch (error) {
         res.status(500).json({ error: 'Error interno del servidor' });
@@ -414,7 +425,7 @@ router.post('/movements', authenticate, async (req, res) => {
     const t = await sequelize.transaction();
     try {
         const biz = req.user.business_id;
-        const { ingredient_id, type, quantity, unit_cost, reason, notes } = req.body;
+        const { ingredient_id, type, quantity, unit_cost, reason, notes, branch_id } = req.body;
         if (!ingredient_id || !type || !quantity) {
             await t.rollback();
             return res.status(400).json({ error: 'ingredient_id, tipo y cantidad son requeridos' });
@@ -426,12 +437,22 @@ router.post('/movements', authenticate, async (req, res) => {
         }
         const movement = await InventoryMovement.create({
             ingredient_id, type, quantity, unit_cost, reason, notes,
-            user_id: req.user.id, business_id: biz
+            user_id: req.user.id, business_id: biz,
+            branch_id: branch_id || null,
         }, { transaction: t });
-        let newStock = parseFloat(ingredient.stock);
+
+        const branchKey = branch_id ? String(branch_id) : null;
+        const currentStock = branchKey
+            ? (() => { const bs = ingredient.branch_stocks || {}; return branchKey in bs ? parseFloat(bs[branchKey]) : 0; })()
+            : parseFloat(ingredient.stock);
+
+        let newStock = currentStock;
         if (type === 'entrada') {
             newStock += parseFloat(quantity);
-            if (unit_cost) {
+            if (branchKey) {
+                const bs = { ...(ingredient.branch_stocks || {}), [branchKey]: newStock };
+                await ingredient.update({ branch_stocks: bs }, { transaction: t });
+            } else if (unit_cost) {
                 const totalValue = (parseFloat(ingredient.stock) * parseFloat(ingredient.cost_per_unit)) +
                                    (parseFloat(quantity) * parseFloat(unit_cost));
                 const newCostPerUnit = totalValue / newStock;
@@ -441,9 +462,19 @@ router.post('/movements', authenticate, async (req, res) => {
             }
         } else if (type === 'salida') {
             newStock -= parseFloat(quantity);
-            await ingredient.update({ stock: newStock }, { transaction: t });
+            if (branchKey) {
+                const bs = { ...(ingredient.branch_stocks || {}), [branchKey]: newStock };
+                await ingredient.update({ branch_stocks: bs }, { transaction: t });
+            } else {
+                await ingredient.update({ stock: newStock }, { transaction: t });
+            }
         } else if (type === 'ajuste') {
-            await ingredient.update({ stock: quantity }, { transaction: t });
+            if (branchKey) {
+                const bs = { ...(ingredient.branch_stocks || {}), [branchKey]: parseFloat(quantity) };
+                await ingredient.update({ branch_stocks: bs }, { transaction: t });
+            } else {
+                await ingredient.update({ stock: quantity }, { transaction: t });
+            }
         }
         await t.commit();
         _notificarInventario(biz); // avisar a clientes SSE conectados

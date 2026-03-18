@@ -89,28 +89,42 @@ router.get('/dashboard', authenticate, async (req, res) => {
             raw: true
         });
 
-        // 5. INSUMOS CON STOCK BAJO (stock < min_stock y min_stock > 0)
-        const productosStockBajo = await Ingredient.count({
-            where: {
-                business_id: biz,
-                active: true,
-                min_stock: { [Op.gt]: 0 },
-                [Op.and]: sequelize.where(sequelize.col('stock'), Op.lt, sequelize.col('min_stock'))
-            }
-        });
-
-        // 5b. LISTA DE INSUMOS CON STOCK BAJO
-        const productosStockBajoLista = await Ingredient.findAll({
-            where: {
-                business_id: biz,
-                active: true,
-                min_stock: { [Op.gt]: 0 },
-                [Op.and]: sequelize.where(sequelize.col('stock'), Op.lt, sequelize.col('min_stock'))
-            },
-            attributes: ['id', 'name', 'stock', 'min_stock'],
-            order: [['stock', 'ASC']],
-            limit: 10
-        });
+        // 5. INSUMOS CON STOCK BAJO — usa branch_stocks si hay sucursal activa
+        const branchIdStr = req.query.branch_id ? String(req.query.branch_id) : null;
+        let productosStockBajo, productosStockBajoLista;
+        if (branchIdStr) {
+            // Con sucursal: filtrar en JS usando branch_stocks (no se puede hacer en SQL con JSON en TEXT)
+            const allIngredients = await Ingredient.findAll({
+                where: { business_id: biz, active: true, min_stock: { [Op.gt]: 0 } }
+            });
+            const getBranchStk = ing => {
+                const bs = ing.branch_stocks || {};
+                return branchIdStr in bs ? parseFloat(bs[branchIdStr]) : 0;
+            };
+            const lowStock = allIngredients.filter(ing => getBranchStk(ing) < parseFloat(ing.min_stock));
+            productosStockBajo = lowStock.length;
+            productosStockBajoLista = lowStock.slice(0, 10).map(ing => ({
+                id: ing.id, name: ing.name,
+                stock: getBranchStk(ing), min_stock: parseFloat(ing.min_stock)
+            }));
+        } else {
+            // Sin sucursal: comparar stock global directamente en SQL
+            productosStockBajo = await Ingredient.count({
+                where: {
+                    business_id: biz, active: true, min_stock: { [Op.gt]: 0 },
+                    [Op.and]: sequelize.where(sequelize.col('stock'), Op.lt, sequelize.col('min_stock'))
+                }
+            });
+            const lista = await Ingredient.findAll({
+                where: {
+                    business_id: biz, active: true, min_stock: { [Op.gt]: 0 },
+                    [Op.and]: sequelize.where(sequelize.col('stock'), Op.lt, sequelize.col('min_stock'))
+                },
+                attributes: ['id', 'name', 'stock', 'min_stock'],
+                order: [['stock', 'ASC']], limit: 10
+            });
+            productosStockBajoLista = lista;
+        }
 
         // 6. CLIENTES ÚNICOS HOY
         const clientesHoy = await Order.count({

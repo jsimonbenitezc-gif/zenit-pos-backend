@@ -77,7 +77,7 @@ app.get('/billing-return', (req, res) => {
 // Página web del KDS para ver en el navegador de cualquier dispositivo.
 // Polling cada 15 s al backend usando el token JWT en la query.
 app.get('/kds', (req, res) => {
-    const { token } = req.query;
+    const { token, branch_id } = req.query;
     if (!token) return res.status(401).send('<h1>Token requerido. Escanea el QR desde la app.</h1>');
     try {
         require('jsonwebtoken').verify(token, process.env.JWT_SECRET);
@@ -85,7 +85,8 @@ app.get('/kds', (req, res) => {
         return res.status(401).send('<h1>Token inválido o expirado. Genera un nuevo QR desde la app.</h1>');
     }
 
-    const safeToken = token.replace(/['"<>&]/g, '');
+    const safeToken    = token.replace(/['"<>&]/g, '');
+    const safeBranchId = branch_id ? String(parseInt(branch_id, 10)) : '';
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(`<!DOCTYPE html>
 <html lang="es">
@@ -133,8 +134,9 @@ app.get('/kds', (req, res) => {
 </header>
 <div id="grid"></div>
 <script>
-  const TOKEN = '${safeToken}';
-  const API   = '/api';
+  const TOKEN     = '${safeToken}';
+  const BRANCH_ID = '${safeBranchId}';
+  const API       = '/api';
   let orders  = [];
 
   // Comandas marcadas como listas en cocina (persisten mientras la página esté abierta)
@@ -143,7 +145,8 @@ app.get('/kds', (req, res) => {
 
   async function cargar() {
     try {
-      const r = await fetch(API + '/orders?status=registrado&limit=100', {
+      const branchQ = BRANCH_ID ? '&branch_id=' + BRANCH_ID : '';
+      const r = await fetch(API + '/orders?status=registrado&limit=100' + branchQ, {
         headers: { 'Authorization': 'Bearer ' + TOKEN }
       });
       if (!r.ok) throw new Error();

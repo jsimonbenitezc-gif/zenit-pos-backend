@@ -163,6 +163,12 @@ const runMigrations = async () => {
     await safeAdd('turnos', 'notas',               { type: DataTypes.TEXT,          allowNull: true });
     await safeAdd('turnos', 'total_tarjeta',       { type: DataTypes.DECIMAL(10,2), defaultValue: 0 });
     await safeAdd('turnos', 'total_transferencia', { type: DataTypes.DECIMAL(10,2), defaultValue: 0 });
+    // Stock por sucursal
+    await safeAdd('ingredients',          'branch_stocks', { type: DataTypes.TEXT, allowNull: true });
+    await safeAdd('inventory_movements',  'branch_id',     { type: DataTypes.INTEGER, allowNull: true });
+    // Teléfono y dirección por sucursal (tabla con B mayúscula)
+    await safeAdd('Branches', 'phone',   { type: DataTypes.STRING, allowNull: true });
+    await safeAdd('Branches', 'address', { type: DataTypes.STRING, allowNull: true });
     // Suscripción
     await safeAdd('users',     'plan_expires_at',     { type: DataTypes.DATE,    allowNull: true });
     await safeAdd('users',     'stripe_customer_id',  { type: DataTypes.STRING,  allowNull: true });

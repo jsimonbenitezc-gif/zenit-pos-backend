@@ -47,6 +47,10 @@ const InventoryMovement = sequelize.define('InventoryMovement', {
     business_id: {
         type: DataTypes.INTEGER,
         allowNull: true
+    },
+    branch_id: {
+        type: DataTypes.INTEGER,
+        allowNull: true
     }
 }, {
     tableName: 'inventory_movements',
