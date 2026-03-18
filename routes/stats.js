@@ -99,7 +99,9 @@ router.get('/dashboard', authenticate, async (req, res) => {
             });
             const getBranchStk = ing => {
                 const bs = ing.branch_stocks || {};
-                return branchIdStr in bs ? parseFloat(bs[branchIdStr]) : 0;
+                if (branchIdStr in bs) return parseFloat(bs[branchIdStr]);
+                if (Object.keys(bs).length === 0) return parseFloat(ing.stock) || 0;
+                return 0;
             };
             const lowStock = allIngredients.filter(ing => getBranchStk(ing) < parseFloat(ing.min_stock));
             productosStockBajo = lowStock.length;

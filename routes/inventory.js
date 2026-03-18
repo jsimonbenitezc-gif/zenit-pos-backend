@@ -87,11 +87,18 @@ router.get('/ingredients', authenticate, async (req, res) => {
             order: [['name', 'ASC']]
         });
         if (branchId) {
-            // Reemplazar stock con el valor de esta sucursal (0 si nunca se ha ajustado en esta sucursal)
             const result = ingredients.map(ing => {
                 const plain = ing.toJSON();
                 const bs = ing.branch_stocks || {};
-                plain.stock = branchId in bs ? bs[branchId] : 0;
+                if (branchId in bs) {
+                    plain.stock = parseFloat(bs[branchId]);
+                } else if (Object.keys(bs).length === 0) {
+                    // Sin branch_stocks aún: usar stock global como fallback
+                    plain.stock = parseFloat(ing.stock) || 0;
+                } else {
+                    // Otras sucursales no tienen stock propio → 0
+                    plain.stock = 0;
+                }
                 return plain;
             });
             return res.json(result);
@@ -443,7 +450,12 @@ router.post('/movements', authenticate, async (req, res) => {
 
         const branchKey = branch_id ? String(branch_id) : null;
         const currentStock = branchKey
-            ? (() => { const bs = ingredient.branch_stocks || {}; return branchKey in bs ? parseFloat(bs[branchKey]) : 0; })()
+            ? (() => {
+                const bs = ingredient.branch_stocks || {};
+                if (branchKey in bs) return parseFloat(bs[branchKey]);
+                if (Object.keys(bs).length === 0) return parseFloat(ingredient.stock) || 0;
+                return 0;
+            })()
             : parseFloat(ingredient.stock);
 
         let newStock = currentStock;

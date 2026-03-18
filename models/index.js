@@ -166,6 +166,30 @@ const runMigrations = async () => {
     // Stock por sucursal
     await safeAdd('ingredients',          'branch_stocks', { type: DataTypes.TEXT, allowNull: true });
     await safeAdd('inventory_movements',  'branch_id',     { type: DataTypes.INTEGER, allowNull: true });
+
+    // Migrar stock global → branch_stocks para la sucursal principal de cada negocio
+    // Solo afecta ingredientes donde branch_stocks es NULL (primera vez)
+    try {
+        await sequelize.query(`
+            UPDATE ingredients
+            SET branch_stocks = (
+                SELECT json_build_object(b.id::text, COALESCE(ingredients.stock::numeric, 0))::text
+                FROM "Branches" b
+                WHERE b.business_id = ingredients.business_id
+                  AND b.active = true
+                ORDER BY b.id ASC
+                LIMIT 1
+            )
+            WHERE ingredients.branch_stocks IS NULL
+              AND EXISTS (
+                SELECT 1 FROM "Branches" b2
+                WHERE b2.business_id = ingredients.business_id AND b2.active = true
+              )
+        `);
+        console.log('✅ Stock global migrado a branch_stocks (sucursal principal)');
+    } catch (err) {
+        console.error('❌ Error migrando branch_stocks:', err.message);
+    }
     // Teléfono y dirección por sucursal (tabla con B mayúscula)
     await safeAdd('Branches', 'phone',   { type: DataTypes.STRING, allowNull: true });
     await safeAdd('Branches', 'address', { type: DataTypes.STRING, allowNull: true });

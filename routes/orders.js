@@ -24,8 +24,9 @@ function getBranchStock(ingredient, branchId) {
     if (!branchId) return parseFloat(ingredient.stock);
     const bs = ingredient.branch_stocks || {};
     const key = String(branchId);
-    // Cada sucursal tiene stock independiente. Si no tiene entrada propia, su stock es 0.
-    return key in bs ? parseFloat(bs[key]) : 0;
+    if (key in bs) return parseFloat(bs[key]);
+    if (Object.keys(bs).length === 0) return parseFloat(ingredient.stock) || 0;
+    return 0;
 }
 
 async function setBranchStock(ingredient, branchId, newStock, transaction) {
