@@ -474,7 +474,6 @@ router.post('/movements', authenticate, async (req, res) => {
             branch_id: branch_id || null,
         }, { transaction: t });
 
-        const branchKey = branch_id ? String(branch_id) : null;
         const currentStock = branchKey
             ? (() => {
                 const bs = ingredient.branch_stocks || {};
