@@ -1,7 +1,8 @@
 const express = require('express');
 const router = express.Router();
-const { Customer, Order, sequelize } = require('../models');
+const { Customer, Order, PrivilegedActionLog, sequelize } = require('../models');
 const { authenticate, isOwner } = require('../middleware/auth');
+const { verifyEmployeePin } = require('../utils/verifyPin');
 const { Op } = require('sequelize');
 
 // GET /api/customers
@@ -149,6 +150,7 @@ router.post('/', authenticate, async (req, res) => {
 });
 
 // PUT /api/customers/:id
+// Body puede incluir { employee_id, pin } para registrar en auditoría quién autorizó el cambio
 router.put('/:id', authenticate, async (req, res) => {
     try {
         const biz = req.user.business_id;
@@ -158,14 +160,56 @@ router.put('/:id', authenticate, async (req, res) => {
         if (!customer) {
             return res.status(404).json({ error: 'Cliente no encontrado' });
         }
-        const { phone, name, address, notes } = req.body;
+
+        const { phone, name, address, notes, employee_id, pin } = req.body;
+
+        // Verificar PIN si se proporcionó
+        let authorizedEmployee = null;
+        if (employee_id && pin) {
+            try {
+                authorizedEmployee = await verifyEmployeePin(employee_id, pin, biz);
+            } catch (pinErr) {
+                return res.status(403).json({ error: pinErr.message });
+            }
+        }
+
         if (phone && phone !== customer.phone) {
             const exists = await Customer.findOne({ where: { phone, business_id: biz } });
             if (exists) {
                 return res.status(400).json({ error: 'Ya existe un cliente con ese teléfono' });
             }
         }
+
+        // Capturar datos antes del cambio para auditoría
+        const beforeData = {
+            name: customer.name,
+            phone: customer.phone,
+            address: customer.address,
+            notes: customer.notes
+        };
+
         await customer.update({ phone, name, address, notes });
+
+        // Registrar en auditoría si hubo autorización
+        if (authorizedEmployee) {
+            const afterData = {
+                name: customer.name,
+                phone: customer.phone,
+                address: customer.address,
+                notes: customer.notes
+            };
+            await PrivilegedActionLog.create({
+                business_id: biz,
+                branch_id: null,
+                employee_id: authorizedEmployee.id,
+                employee_name: authorizedEmployee.name,
+                action_type: 'edit_customer',
+                target_description: `Cliente #${customer.id} — ${customer.name}`,
+                before_data: JSON.stringify(beforeData),
+                after_data: JSON.stringify(afterData)
+            });
+        }
+
         res.json(customer);
     } catch (error) {
         console.error('Error al actualizar cliente:', error);

@@ -1,8 +1,18 @@
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
+const rateLimit = require('express-rate-limit');
 const { User } = require('../models');
 const { authenticate, isOwner } = require('../middleware/auth');
+
+// Protección: máximo 10 intentos de login cada 15 minutos por IP
+const loginLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 10,
+    message: { error: 'Demasiados intentos de inicio de sesión. Intenta de nuevo en 15 minutos.' },
+    standardHeaders: true,
+    legacyHeaders: false
+});
 
 // GET /api/staff — Listar todos los empleados del negocio
 router.get('/', authenticate, isOwner, async (req, res) => {
@@ -133,8 +143,42 @@ router.delete('/:id', authenticate, isOwner, async (req, res) => {
     }
 });
 
+// POST /api/staff/verify-pin — Verificar PIN de un empleado sin crear token nuevo
+// Recibe { employee_id, pin }. Requiere sesión activa. Útil para autorizar acciones sensibles.
+router.post('/verify-pin', authenticate, async (req, res) => {
+    try {
+        const { employee_id, pin } = req.body;
+        const biz = req.user.business_id;
+
+        if (!employee_id || !pin) {
+            return res.status(400).json({ error: 'employee_id y pin son requeridos' });
+        }
+
+        const employee = await User.findByPk(employee_id);
+
+        // Verificar que el empleado pertenece al negocio (puede ser el dueño o un empleado)
+        const perteneceAlNegocio =
+            employee &&
+            employee.active &&
+            (employee.id === biz || employee.business_id === biz);
+
+        if (!perteneceAlNegocio) {
+            return res.json({ valid: false });
+        }
+
+        const valid = await employee.comparePassword(pin);
+        res.json({
+            valid,
+            employee_name: valid ? employee.name : undefined
+        });
+    } catch (error) {
+        console.error('Error en verify-pin:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
 // POST /api/staff/login — Login de empleado (genera token con business_id del dueño)
-router.post('/login', async (req, res) => {
+router.post('/login', loginLimiter, async (req, res) => {
     try {
         const { username, password } = req.body;
         if (!username || !password) {

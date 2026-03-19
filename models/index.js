@@ -29,6 +29,9 @@ const Table = require('./Table');
 // Turnos
 const Turno = require('./Turno');
 
+// Auditoría de acciones privilegiadas
+const PrivilegedActionLog = require('./PrivilegedActionLog');
+
 // Objeto con todos los modelos
 const models = {
     User,
@@ -48,6 +51,7 @@ const models = {
     Branch,
     Table,
     Turno,
+    PrivilegedActionLog,
 };
 
 // Definir relaciones
@@ -197,6 +201,8 @@ const runMigrations = async () => {
     await safeAdd('users',     'plan_expires_at',     { type: DataTypes.DATE,    allowNull: true });
     await safeAdd('users',     'stripe_customer_id',  { type: DataTypes.STRING,  allowNull: true });
     await safeAdd('users',     'stripe_subscription_id', { type: DataTypes.STRING, allowNull: true });
+    // Auditoría: requiere PIN por descuento
+    await safeAdd('discounts', 'requires_pin', { type: DataTypes.BOOLEAN, defaultValue: false, allowNull: false });
     // plan ENUM — se maneja con SQL directo para compatibilidad con PostgreSQL
     try {
         await sequelize.query(`DO $$ BEGIN

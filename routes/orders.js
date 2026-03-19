@@ -1,7 +1,8 @@
 const express = require('express');
 const router = express.Router();
-const { Order, OrderItem, Product, Customer, Table, ProductRecipe, Ingredient, PreparationItem, sequelize } = require('../models');
+const { Order, OrderItem, Product, Customer, Table, ProductRecipe, Ingredient, PreparationItem, PrivilegedActionLog, sequelize } = require('../models');
 const { authenticate } = require('../middleware/auth');
+const { verifyEmployeePin } = require('../utils/verifyPin');
 const { Op } = require('sequelize');
 
 // Factores de conversión entre unidades compatibles
@@ -407,10 +408,11 @@ router.delete('/:id/items/:itemId', authenticate, async (req, res) => {
 });
 
 // PUT /api/orders/:id/status
+// Si status='cancelado', body puede incluir { employee_id, pin } para registrar en auditoría
 router.put('/:id/status', authenticate, async (req, res) => {
     try {
         const biz = req.user.business_id;
-        const { status } = req.body;
+        const { status, employee_id, pin } = req.body;
 
         if (!['registrado', 'completado', 'entregado', 'cancelado'].includes(status)) {
             return res.status(400).json({ error: 'Estado inválido. Use: registrado, completado, entregado o cancelado' });
@@ -421,7 +423,32 @@ router.put('/:id/status', authenticate, async (req, res) => {
             return res.status(404).json({ error: 'Pedido no encontrado' });
         }
 
+        // Si se está cancelando con PIN: verificar y registrar en auditoría
+        let authorizedEmployee = null;
+        if (status === 'cancelado' && employee_id && pin) {
+            try {
+                authorizedEmployee = await verifyEmployeePin(employee_id, pin, biz);
+            } catch (pinErr) {
+                return res.status(403).json({ error: pinErr.message });
+            }
+        }
+
+        const beforeStatus = order.status;
         await order.update({ status });
+
+        if (authorizedEmployee && status === 'cancelado') {
+            await PrivilegedActionLog.create({
+                business_id: biz,
+                branch_id: order.branch_id || null,
+                employee_id: authorizedEmployee.id,
+                employee_name: authorizedEmployee.name,
+                action_type: 'cancel_order',
+                target_description: `Pedido #${order.id}`,
+                before_data: JSON.stringify({ id: order.id, status: beforeStatus, total: order.total }),
+                after_data: JSON.stringify({ id: order.id, status: 'cancelado', total: order.total })
+            });
+        }
+
         res.json(order);
     } catch (error) {
         res.status(500).json({ error: 'Error interno del servidor' });
@@ -437,6 +464,9 @@ router.put('/:id', authenticate, async (req, res) => {
             return res.status(404).json({ error: 'Pedido no encontrado' });
         }
         const { status, payment_method, order_type, reference, delivery_address, maps_link, notes } = req.body;
+        if (status !== undefined && !['registrado', 'completado', 'entregado', 'cancelado'].includes(status)) {
+            return res.status(400).json({ error: 'Estado inválido. Use: registrado, completado, entregado o cancelado' });
+        }
         await order.update({ status, payment_method, order_type, reference, delivery_address, maps_link, notes });
         res.json(order);
     } catch (error) {
@@ -445,11 +475,25 @@ router.put('/:id', authenticate, async (req, res) => {
 });
 
 // DELETE /api/orders/:id
+// Body opcional: { employee_id, pin } — si se proveen, se verifica el PIN y se registra en auditoría
 router.delete('/:id', authenticate, async (req, res) => {
     const t = await sequelize.transaction();
 
     try {
         const biz = req.user.business_id;
+        const { employee_id, pin } = req.body || {};
+
+        // Verificar PIN si se proporcionó
+        let authorizedEmployee = null;
+        if (employee_id && pin) {
+            try {
+                authorizedEmployee = await verifyEmployeePin(employee_id, pin, biz);
+            } catch (pinErr) {
+                await t.rollback();
+                return res.status(403).json({ error: pinErr.message });
+            }
+        }
+
         const order = await Order.findOne({
             where: { id: req.params.id, business_id: biz },
             include: [{ model: OrderItem, as: 'items' }],
@@ -460,6 +504,15 @@ router.delete('/:id', authenticate, async (req, res) => {
             await t.rollback();
             return res.status(404).json({ error: 'Pedido no encontrado' });
         }
+
+        // Capturar estado antes de la cancelación (para auditoría)
+        const beforeData = {
+            id: order.id,
+            status: order.status,
+            total: order.total,
+            payment_method: order.payment_method,
+            order_type: order.order_type
+        };
 
         // Solo restaurar stock si el pedido no estaba ya cancelado (evita doble restauración)
         if (order.status !== 'cancelado') {
@@ -472,6 +525,21 @@ router.delete('/:id', authenticate, async (req, res) => {
         }
 
         await order.update({ status: 'cancelado' }, { transaction: t });
+
+        // Registrar en auditoría si hubo autorización con PIN
+        if (authorizedEmployee) {
+            await PrivilegedActionLog.create({
+                business_id: biz,
+                branch_id: order.branch_id || null,
+                employee_id: authorizedEmployee.id,
+                employee_name: authorizedEmployee.name,
+                action_type: 'cancel_order',
+                target_description: `Pedido #${order.id}`,
+                before_data: JSON.stringify(beforeData),
+                after_data: JSON.stringify({ ...beforeData, status: 'cancelado' })
+            }, { transaction: t });
+        }
+
         await t.commit();
         res.json({ message: 'Pedido cancelado correctamente' });
     } catch (error) {

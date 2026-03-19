@@ -40,6 +40,11 @@ const Discount = sequelize.define('Discount', {
         type: DataTypes.BOOLEAN,
         defaultValue: true
     },
+    // Si true, el frontend debe pedir PIN de empleado antes de aplicar este descuento
+    requires_pin: {
+        type: DataTypes.BOOLEAN,
+        defaultValue: false
+    },
     business_id: {
         type: DataTypes.INTEGER,
         allowNull: true

@@ -234,6 +234,7 @@ app.use('/api/alerts', require('./routes/alerts'));
 app.use('/api/branches', require('./routes/branches'));
 app.use('/api/tables',   require('./routes/tables'));
 app.use('/api/turnos',   require('./routes/turnos'));
+app.use('/api/audit',    require('./routes/audit'));
 
 // Error handling
 app.use((err, req, res, next) => {

@@ -61,7 +61,7 @@ router.get('/discounts/:id', authenticate, async (req, res) => {
 router.post('/discounts', authenticate, isOwner, async (req, res) => {
     try {
         const biz = req.user.business_id;
-        const { name, type, value, applies_to, target_id, start_date, end_date, active } = req.body;
+        const { name, type, value, applies_to, target_id, start_date, end_date, active, requires_pin } = req.body;
         if (!name || !type || value === undefined) {
             return res.status(400).json({ error: 'Name, type and value are required' });
         }
@@ -78,6 +78,7 @@ router.post('/discounts', authenticate, isOwner, async (req, res) => {
             name, type, value, applies_to: applies_to || 'all',
             target_id, start_date, end_date,
             active: active !== undefined ? active : true,
+            requires_pin: requires_pin === true,
             business_id: biz
         });
         res.status(201).json(discount);
@@ -93,7 +94,7 @@ router.put('/discounts/:id', authenticate, isOwner, async (req, res) => {
         if (!discount) {
             return res.status(404).json({ error: 'Descuento no encontrado' });
         }
-        const { name, type, value, applies_to, target_id, start_date, end_date, active } = req.body;
+        const { name, type, value, applies_to, target_id, start_date, end_date, active, requires_pin } = req.body;
         await discount.update({
             name: name !== undefined ? name : discount.name,
             type: type !== undefined ? type : discount.type,
@@ -102,7 +103,8 @@ router.put('/discounts/:id', authenticate, isOwner, async (req, res) => {
             target_id: target_id !== undefined ? target_id : discount.target_id,
             start_date: start_date !== undefined ? start_date : discount.start_date,
             end_date: end_date !== undefined ? end_date : discount.end_date,
-            active: active !== undefined ? active : discount.active
+            active: active !== undefined ? active : discount.active,
+            requires_pin: requires_pin !== undefined ? requires_pin === true : discount.requires_pin
         });
         res.json(discount);
     } catch (error) {

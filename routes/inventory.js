@@ -7,9 +7,11 @@ const {
     Product,
     ProductRecipe,
     InventoryMovement,
+    PrivilegedActionLog,
     sequelize
 } = require('../models');
 const { authenticate, isOwner } = require('../middleware/auth');
+const { verifyEmployeePin } = require('../utils/verifyPin');
 const { requirePremium } = require('../middleware/checkPlan');
 const jwt = require('jsonwebtoken');
 
@@ -432,16 +434,40 @@ router.post('/movements', authenticate, async (req, res) => {
     const t = await sequelize.transaction();
     try {
         const biz = req.user.business_id;
-        const { ingredient_id, type, quantity, unit_cost, reason, notes, branch_id } = req.body;
+        const { ingredient_id, type, quantity, unit_cost, reason, notes, branch_id, employee_id, pin } = req.body;
         if (!ingredient_id || !type || !quantity) {
             await t.rollback();
             return res.status(400).json({ error: 'ingredient_id, tipo y cantidad son requeridos' });
         }
+
+        // Ajuste manual: verificar PIN si se proporcionó
+        let authorizedEmployee = null;
+        if (type === 'ajuste' && employee_id && pin) {
+            try {
+                authorizedEmployee = await verifyEmployeePin(employee_id, pin, biz);
+            } catch (pinErr) {
+                await t.rollback();
+                return res.status(403).json({ error: pinErr.message });
+            }
+        }
+
         const ingredient = await Ingredient.findOne({ where: { id: ingredient_id, business_id: biz }, transaction: t });
         if (!ingredient) {
             await t.rollback();
             return res.status(404).json({ error: 'Insumo no encontrado' });
         }
+
+        // Stock antes del ajuste (para auditoría)
+        const branchKey = branch_id ? String(branch_id) : null;
+        const stockAntes = branchKey
+            ? (() => {
+                const bs = ingredient.branch_stocks || {};
+                if (branchKey in bs) return parseFloat(bs[branchKey]);
+                if (Object.keys(bs).length === 0) return parseFloat(ingredient.stock) || 0;
+                return 0;
+            })()
+            : parseFloat(ingredient.stock);
+
         const movement = await InventoryMovement.create({
             ingredient_id, type, quantity, unit_cost, reason, notes,
             user_id: req.user.id, business_id: biz,
@@ -489,6 +515,21 @@ router.post('/movements', authenticate, async (req, res) => {
             }
         }
         await t.commit();
+
+        // Registrar en auditoría si fue un ajuste autorizado con PIN
+        if (type === 'ajuste' && authorizedEmployee) {
+            await PrivilegedActionLog.create({
+                business_id: biz,
+                branch_id: branch_id || null,
+                employee_id: authorizedEmployee.id,
+                employee_name: authorizedEmployee.name,
+                action_type: 'inventory_adjustment',
+                target_description: `Insumo: ${ingredient.name}`,
+                before_data: JSON.stringify({ ingredient_id, name: ingredient.name, stock: stockAntes }),
+                after_data: JSON.stringify({ ingredient_id, name: ingredient.name, stock: parseFloat(quantity), reason: reason || null })
+            });
+        }
+
         _notificarInventario(biz); // avisar a clientes SSE conectados
         const fullMovement = await InventoryMovement.findByPk(movement.id, {
             include: [{ model: Ingredient, as: 'ingredient', attributes: ['id', 'name', 'unit', 'stock'] }]
