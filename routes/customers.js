@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { Customer, Order, PrivilegedActionLog, sequelize } = require('../models');
+const { Customer, Order, PrivilegedActionLog, User, sequelize } = require('../models');
 const { authenticate, isOwner } = require('../middleware/auth');
 const { verifyEmployeePin } = require('../utils/verifyPin');
 const { Op } = require('sequelize');
@@ -163,13 +163,17 @@ router.put('/:id', authenticate, async (req, res) => {
 
         const { phone, name, address, notes, employee_id, pin } = req.body;
 
-        // Verificar PIN si se proporcionó
+        // Registrar en auditoría (PIN verificado en el frontend)
         let authorizedEmployee = null;
-        if (employee_id && pin) {
-            try {
-                authorizedEmployee = await verifyEmployeePin(employee_id, pin, biz);
-            } catch (pinErr) {
-                return res.status(403).json({ error: pinErr.message });
+        if (employee_id) {
+            if (pin) {
+                try {
+                    authorizedEmployee = await verifyEmployeePin(employee_id, pin, biz);
+                } catch (pinErr) {
+                    return res.status(403).json({ error: pinErr.message });
+                }
+            } else {
+                authorizedEmployee = await User.findByPk(employee_id);
             }
         }
 

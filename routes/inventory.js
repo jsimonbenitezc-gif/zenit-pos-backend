@@ -8,6 +8,7 @@ const {
     ProductRecipe,
     InventoryMovement,
     PrivilegedActionLog,
+    User,
     sequelize
 } = require('../models');
 const { authenticate, isOwner } = require('../middleware/auth');
@@ -440,14 +441,18 @@ router.post('/movements', authenticate, async (req, res) => {
             return res.status(400).json({ error: 'ingredient_id, tipo y cantidad son requeridos' });
         }
 
-        // Ajuste manual: verificar PIN si se proporcionó
+        // Ajuste manual: registrar en auditoría (PIN verificado en el frontend)
         let authorizedEmployee = null;
-        if (type === 'ajuste' && employee_id && pin) {
-            try {
-                authorizedEmployee = await verifyEmployeePin(employee_id, pin, biz);
-            } catch (pinErr) {
-                await t.rollback();
-                return res.status(403).json({ error: pinErr.message });
+        if (type === 'ajuste' && employee_id) {
+            if (pin) {
+                try {
+                    authorizedEmployee = await verifyEmployeePin(employee_id, pin, biz);
+                } catch (pinErr) {
+                    await t.rollback();
+                    return res.status(403).json({ error: pinErr.message });
+                }
+            } else {
+                authorizedEmployee = await User.findByPk(employee_id);
             }
         }
 

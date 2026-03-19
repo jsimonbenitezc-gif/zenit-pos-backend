@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { Order, OrderItem, Product, Customer, Table, ProductRecipe, Ingredient, PreparationItem, PrivilegedActionLog, sequelize } = require('../models');
+const { Order, OrderItem, Product, Customer, Table, ProductRecipe, Ingredient, PreparationItem, PrivilegedActionLog, User, sequelize } = require('../models');
 const { authenticate } = require('../middleware/auth');
 const { verifyEmployeePin } = require('../utils/verifyPin');
 const { Op } = require('sequelize');
@@ -423,13 +423,17 @@ router.put('/:id/status', authenticate, async (req, res) => {
             return res.status(404).json({ error: 'Pedido no encontrado' });
         }
 
-        // Si se está cancelando con PIN: verificar y registrar en auditoría
+        // Si se está cancelando: registrar en auditoría (PIN verificado en el frontend)
         let authorizedEmployee = null;
-        if (status === 'cancelado' && employee_id && pin) {
-            try {
-                authorizedEmployee = await verifyEmployeePin(employee_id, pin, biz);
-            } catch (pinErr) {
-                return res.status(403).json({ error: pinErr.message });
+        if (status === 'cancelado' && employee_id) {
+            if (pin) {
+                try {
+                    authorizedEmployee = await verifyEmployeePin(employee_id, pin, biz);
+                } catch (pinErr) {
+                    return res.status(403).json({ error: pinErr.message });
+                }
+            } else {
+                authorizedEmployee = await User.findByPk(employee_id);
             }
         }
 
