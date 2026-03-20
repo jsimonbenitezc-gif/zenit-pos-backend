@@ -309,14 +309,8 @@ router.post('/', authenticate, async (req, res) => {
                 notes: itemNotes
             }, { transaction: t });
 
-            // Solo descontar product.stock si el producto NO tiene receta;
-            // si tiene receta, el stock se controla vía ingredientes.
-            const recipeCount = await ProductRecipe.count({ where: { product_id: product.id }, transaction: t });
-            if (recipeCount === 0) {
-                await product.update({ stock: product.stock - qty }, { transaction: t });
-            } else {
-                await descontarIngredientesDeReceta(product.id, qty, t, branch_id || null);
-            }
+            // Descontar insumos según la receta del producto (si tiene receta)
+            await descontarIngredientesDeReceta(product.id, qty, t, branch_id || null);
         }
 
         await t.commit();
@@ -333,21 +327,30 @@ router.post('/', authenticate, async (req, res) => {
             ]
         });
 
-        // Push notification: producto sin stock (solo para productos SIN receta;
-        // los que tienen receta se controlan por ingredientes, no por product.stock)
+        // Push notification: insumo sin stock (basado en niveles de ingredientes, no product.stock)
         const prefs = await getPrefs(biz);
         if (prefs.notif_stock_cero !== false) {
+            // Recolectar ingredientes afectados por esta venta
+            const ingNotificados = new Set();
             for (const { product } of resolvedItems) {
-                const hasRecipe = await ProductRecipe.count({ where: { product_id: product.id } });
-                if (hasRecipe > 0) continue; // stock se mide por ingredientes, no por product.stock
-                const prodActualizado = await Product.findByPk(product.id, { attributes: ['id', 'name', 'stock'] });
-                if (prodActualizado && prodActualizado.stock <= 0) {
-                    enviarNotificacion(
-                        biz,
-                        null,
-                        '⚠️ Producto sin stock',
-                        `"${prodActualizado.name}" llegó a 0 unidades`
-                    );
+                const recetaItems = await ProductRecipe.findAll({ where: { product_id: product.id } });
+                for (const ri of recetaItems) {
+                    if (ri.item_type === 'ingredient' && !ingNotificados.has(ri.item_id)) {
+                        const ing = await Ingredient.findByPk(ri.item_id, { attributes: ['id', 'name', 'stock', 'min_stock', 'branch_stocks'] });
+                        if (!ing) continue;
+                        const branchId = branch_id || null;
+                        const stockActual = getBranchStock(ing, branchId);
+                        const minStock = parseFloat(ing.min_stock) || 0;
+                        if (stockActual <= minStock && minStock > 0) {
+                            ingNotificados.add(ri.item_id);
+                            enviarNotificacion(
+                                biz,
+                                null,
+                                '⚠️ Insumo con stock bajo',
+                                `"${ing.name}" tiene ${stockActual.toFixed(1)} (mínimo: ${minStock})`
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -417,12 +420,7 @@ router.post('/:id/items', authenticate, async (req, res) => {
                 notes: item.notes || '',
             }, { transaction: t });
 
-            const recipeCount = await ProductRecipe.count({ where: { product_id: product.id }, transaction: t });
-            if (recipeCount === 0) {
-                await product.update({ stock: product.stock - qty }, { transaction: t });
-            } else {
-                await descontarIngredientesDeReceta(product.id, qty, t, order.branch_id || null);
-            }
+            await descontarIngredientesDeReceta(product.id, qty, t, order.branch_id || null);
         }
 
         const newTotal = parseFloat((parseFloat(order.total) + additionalTotal).toFixed(2));
@@ -467,15 +465,6 @@ router.delete('/:id/items/:itemId', authenticate, async (req, res) => {
         if (!item) {
             await t.rollback();
             return res.status(404).json({ error: 'Item no encontrado' });
-        }
-
-        // Restaurar stock solo si el producto no tiene receta
-        const product = await Product.findByPk(item.product_id, { transaction: t });
-        if (product) {
-            const recipeCount = await ProductRecipe.count({ where: { product_id: product.id }, transaction: t });
-            if (recipeCount === 0) {
-                await product.update({ stock: product.stock + item.quantity }, { transaction: t });
-            }
         }
 
         await item.destroy({ transaction: t });
@@ -622,19 +611,6 @@ router.delete('/:id', authenticate, async (req, res) => {
             payment_method: order.payment_method,
             order_type: order.order_type
         };
-
-        // Solo restaurar stock si el pedido no estaba ya cancelado (evita doble restauración)
-        if (order.status !== 'cancelado') {
-            for (const item of order.items) {
-                const product = await Product.findByPk(item.product_id, { transaction: t });
-                if (product) {
-                    const recipeCount = await ProductRecipe.count({ where: { product_id: product.id }, transaction: t });
-                    if (recipeCount === 0) {
-                        await product.update({ stock: product.stock + item.quantity }, { transaction: t });
-                    }
-                }
-            }
-        }
 
         await order.update({ status: 'cancelado' }, { transaction: t });
 
