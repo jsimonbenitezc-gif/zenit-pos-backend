@@ -23,6 +23,10 @@ const UNIT_CONVERSION = {
     'g_kg': 0.001,
     'l_ml': 1000,
     'ml_l': 0.001,
+    'ml_gal': 0.000264,
+    'gal_ml': 3785.41,
+    'l_gal': 0.26417,
+    'gal_l': 3.78541,
 };
 
 function convertUnit(qty, fromUnit, toUnit) {

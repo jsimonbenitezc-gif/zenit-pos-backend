@@ -309,11 +309,14 @@ router.post('/', authenticate, async (req, res) => {
                 notes: itemNotes
             }, { transaction: t });
 
-            await product.update({
-                stock: product.stock - qty
-            }, { transaction: t });
-
-            await descontarIngredientesDeReceta(product.id, qty, t, branch_id || null);
+            // Solo descontar product.stock si el producto NO tiene receta;
+            // si tiene receta, el stock se controla vía ingredientes.
+            const recipeCount = await ProductRecipe.count({ where: { product_id: product.id }, transaction: t });
+            if (recipeCount === 0) {
+                await product.update({ stock: product.stock - qty }, { transaction: t });
+            } else {
+                await descontarIngredientesDeReceta(product.id, qty, t, branch_id || null);
+            }
         }
 
         await t.commit();
@@ -412,8 +415,12 @@ router.post('/:id/items', authenticate, async (req, res) => {
                 notes: item.notes || '',
             }, { transaction: t });
 
-            await product.update({ stock: product.stock - qty }, { transaction: t });
-            await descontarIngredientesDeReceta(product.id, qty, t, order.branch_id || null);
+            const recipeCount = await ProductRecipe.count({ where: { product_id: product.id }, transaction: t });
+            if (recipeCount === 0) {
+                await product.update({ stock: product.stock - qty }, { transaction: t });
+            } else {
+                await descontarIngredientesDeReceta(product.id, qty, t, order.branch_id || null);
+            }
         }
 
         const newTotal = parseFloat((parseFloat(order.total) + additionalTotal).toFixed(2));
@@ -460,10 +467,13 @@ router.delete('/:id/items/:itemId', authenticate, async (req, res) => {
             return res.status(404).json({ error: 'Item no encontrado' });
         }
 
-        // Restaurar stock
+        // Restaurar stock solo si el producto no tiene receta
         const product = await Product.findByPk(item.product_id, { transaction: t });
         if (product) {
-            await product.update({ stock: product.stock + item.quantity }, { transaction: t });
+            const recipeCount = await ProductRecipe.count({ where: { product_id: product.id }, transaction: t });
+            if (recipeCount === 0) {
+                await product.update({ stock: product.stock + item.quantity }, { transaction: t });
+            }
         }
 
         await item.destroy({ transaction: t });
@@ -616,7 +626,10 @@ router.delete('/:id', authenticate, async (req, res) => {
             for (const item of order.items) {
                 const product = await Product.findByPk(item.product_id, { transaction: t });
                 if (product) {
-                    await product.update({ stock: product.stock + item.quantity }, { transaction: t });
+                    const recipeCount = await ProductRecipe.count({ where: { product_id: product.id }, transaction: t });
+                    if (recipeCount === 0) {
+                        await product.update({ stock: product.stock + item.quantity }, { transaction: t });
+                    }
                 }
             }
         }
