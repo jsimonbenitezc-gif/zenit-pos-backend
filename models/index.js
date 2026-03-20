@@ -266,6 +266,33 @@ const runMigrations = async () => {
         console.error('❌ Error en backfill de inventory_movements.business_id:', err.message);
     }
 
+    // ── Índice parcial único: solo un turno abierto por (business_id, branch_id) ─
+    // COALESCE convierte branch_id NULL en 0 para que NULL=NULL sí colisione
+    try {
+        await sequelize.query(`
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_turnos_one_open
+            ON turnos (business_id, COALESCE(branch_id, 0))
+            WHERE estado = 'abierto'
+        `);
+    } catch (err) {
+        if (!err.message.includes('already exists')) console.error('❌ Migration idx_turnos_one_open:', err.message);
+    }
+
+    // ── Índices de rendimiento ───────────────────────────────────────────────────
+    const indexes = [
+        `CREATE INDEX IF NOT EXISTS idx_orders_biz_status     ON orders    (business_id, status)`,
+        `CREATE INDEX IF NOT EXISTS idx_orders_biz_createdat  ON orders    (business_id, "createdAt" DESC)`,
+        `CREATE INDEX IF NOT EXISTS idx_customers_biz         ON customers (business_id)`,
+        `CREATE INDEX IF NOT EXISTS idx_ingredients_biz       ON ingredients (business_id)`,
+    ];
+    for (const sql of indexes) {
+        try {
+            await sequelize.query(sql);
+        } catch (err) {
+            if (!err.message.includes('already exists')) console.error('❌ Migration index:', err.message);
+        }
+    }
+
     console.log('✅ Migrations applied');
 };
 

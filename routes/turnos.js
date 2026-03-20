@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { Op } = require('sequelize');
-const { Turno, Order } = require('../models');
+const { Turno, Order, sequelize } = require('../models');
 const { authenticate } = require('../middleware/auth');
 const jwt = require('jsonwebtoken');
 const { enviarNotificacion, getPrefs } = require('../utils/push');
@@ -84,18 +84,24 @@ router.get('/historial', authenticate, async (req, res) => {
 
 // POST /api/turnos — Abrir un nuevo turno
 router.post('/', authenticate, async (req, res) => {
+    const t = await sequelize.transaction();
     try {
         const { cajero_nombre, rol, fondo_inicial, branch_id } = req.body;
 
-        // Solo puede haber un turno abierto por sucursal
+        // Solo puede haber un turno abierto por sucursal.
+        // El FOR UPDATE bloquea la fila si existe; el índice parcial único en BD
+        // rechaza la creación si dos requests llegan al mismo tiempo.
         const existing = await Turno.findOne({
             where: {
                 business_id: req.user.business_id,
                 estado: 'abierto',
-                ...(branch_id ? { branch_id } : {})
-            }
+                ...(branch_id ? { branch_id } : { branch_id: null })
+            },
+            lock: t.LOCK.UPDATE,
+            transaction: t
         });
         if (existing) {
+            await t.rollback();
             return res.status(400).json({ error: 'Ya hay un turno abierto' });
         }
 
@@ -107,7 +113,9 @@ router.post('/', authenticate, async (req, res) => {
             fondo_inicial: parseFloat(fondo_inicial) || 0,
             apertura:    new Date(),
             estado:      'abierto'
-        });
+        }, { transaction: t });
+
+        await t.commit();
 
         _notificarTurno(req.user.business_id);
 
@@ -121,6 +129,10 @@ router.post('/', authenticate, async (req, res) => {
 
         res.status(201).json(turno);
     } catch (error) {
+        await t.rollback();
+        if (error.name === 'SequelizeUniqueConstraintError') {
+            return res.status(400).json({ error: 'Ya hay un turno abierto' });
+        }
         console.error('Error al abrir turno:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
