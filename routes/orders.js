@@ -417,7 +417,7 @@ router.delete('/:id/items/:itemId', authenticate, async (req, res) => {
 router.put('/:id/status', authenticate, async (req, res) => {
     try {
         const biz = req.user.business_id;
-        const { status, employee_id, pin } = req.body;
+        const { status, employee_id, pin, employee_name } = req.body;
 
         if (!['registrado', 'completado', 'entregado', 'cancelado'].includes(status)) {
             return res.status(400).json({ error: 'Estado inválido. Use: registrado, completado, entregado o cancelado' });
@@ -450,7 +450,7 @@ router.put('/:id/status', authenticate, async (req, res) => {
                 business_id: biz,
                 branch_id: order.branch_id || null,
                 employee_id: authorizedEmployee.id,
-                employee_name: authorizedEmployee.name,
+                employee_name: employee_name || authorizedEmployee.name,
                 action_type: 'cancel_order',
                 target_description: `Pedido #${order.id}`,
                 before_data: JSON.stringify({ id: order.id, status: beforeStatus, total: order.total }),

@@ -162,7 +162,7 @@ router.put('/:id', authenticate, async (req, res) => {
             return res.status(404).json({ error: 'Cliente no encontrado' });
         }
 
-        const { phone, name, address, notes, employee_id, pin } = req.body;
+        const { phone, name, address, notes, employee_id, pin, employee_name } = req.body;
 
         // Registrar en auditoría (PIN verificado en el frontend)
         let authorizedEmployee = null;
@@ -207,7 +207,7 @@ router.put('/:id', authenticate, async (req, res) => {
                 business_id: biz,
                 branch_id: null,
                 employee_id: authorizedEmployee.id,
-                employee_name: authorizedEmployee.name,
+                employee_name: employee_name || authorizedEmployee.name,
                 action_type: 'edit_customer',
                 target_description: `Cliente #${customer.id} — ${customer.name}`,
                 before_data: JSON.stringify(beforeData),

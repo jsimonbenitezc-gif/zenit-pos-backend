@@ -436,7 +436,7 @@ router.post('/movements', authenticate, async (req, res) => {
     const t = await sequelize.transaction();
     try {
         const biz = req.user.business_id;
-        const { ingredient_id, type, quantity, unit_cost, reason, notes, branch_id, employee_id, pin } = req.body;
+        const { ingredient_id, type, quantity, unit_cost, reason, notes, branch_id, employee_id, pin, employee_name } = req.body;
         if (!ingredient_id || !type || !quantity) {
             await t.rollback();
             return res.status(400).json({ error: 'ingredient_id, tipo y cantidad son requeridos' });
@@ -527,7 +527,7 @@ router.post('/movements', authenticate, async (req, res) => {
                 business_id: biz,
                 branch_id: branch_id || null,
                 employee_id: authorizedEmployee.id,
-                employee_name: authorizedEmployee.name,
+                employee_name: employee_name || authorizedEmployee.name,
                 action_type: 'inventory_adjustment',
                 target_description: `Insumo: ${ingredient.name}`,
                 before_data: JSON.stringify({ ingredient_id, name: ingredient.name, stock: stockAntes }),
