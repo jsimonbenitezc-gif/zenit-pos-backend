@@ -81,8 +81,9 @@ router.post('/', authenticate, requirePremium, isOwner, async (req, res) => {
                 const ingredients = await Ingredient.findAll({ where: { business_id: biz, active: true } });
                 for (const ing of ingredients) {
                     await Ingredient.create({
-                        name: ing.name, unit: ing.unit, stock_actual: 0,
-                        stock_minimo: ing.stock_minimo, business_id: biz
+                        name: ing.name, unit: ing.unit, stock: 0,
+                        min_stock: ing.min_stock, cost_per_unit: ing.cost_per_unit,
+                        business_id: biz
                     });
                 }
             }

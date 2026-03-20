@@ -68,7 +68,24 @@ router.put('/', authenticate, async (req, res) => {
         const user = await User.findByPk(req.user.id);
         if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
         const current = user.settings ? JSON.parse(user.settings) : {};
-        const updated = { ...current, ...req.body };
+        const ALLOWED_KEYS = [
+            'business_name', 'business_phone', 'business_email', 'business_website',
+            'business_rfc', 'business_instagram', 'business_city', 'business_state',
+            'business_address', 'business_tipo',
+            'currency_symbol', 'ticket_footer',
+            'show_logo', 'show_phone', 'show_direccion', 'show_email',
+            'show_website', 'show_instagram', 'show_rfc',
+            'logo_base64',
+            'venta_sin_turno',
+            'puntos_activos', 'puntos_por_peso', 'puntos_bono_pedido', 'puntos_valor',
+            'permisos_roles',
+            'sucursal_id',
+        ];
+        const incoming = {};
+        for (const key of ALLOWED_KEYS) {
+            if (key in req.body) incoming[key] = req.body[key];
+        }
+        const updated = { ...current, ...incoming };
         await user.update({ settings: JSON.stringify(updated) });
         // Notificar a todos los dispositivos conectados del mismo negocio
         _notificarSettings(req.user.business_id);
