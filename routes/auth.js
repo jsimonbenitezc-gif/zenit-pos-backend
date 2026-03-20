@@ -4,6 +4,7 @@ const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
 const { User } = require('../models');
 const { authenticate } = require('../middleware/auth');
+const { enviarNotificacion } = require('../utils/push');
 
 // Protección: máximo 10 intentos de login cada 15 minutos por IP
 const loginLimiter = rateLimit({
@@ -60,6 +61,14 @@ router.post('/login', loginLimiter, async (req, res) => {
             },
             process.env.JWT_SECRET,
             { expiresIn: '30d' }
+        );
+
+        // Push notification: nuevo acceso al sistema
+        enviarNotificacion(
+            businessId,
+            'notif_nuevo_acceso',
+            '🔓 Nuevo acceso al sistema',
+            `${user.name || user.username} inició sesión en la app`
         );
 
         res.json({

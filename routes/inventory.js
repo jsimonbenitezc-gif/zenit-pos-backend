@@ -16,6 +16,7 @@ const { verifyEmployeePin } = require('../utils/verifyPin');
 const { requirePremium } = require('../middleware/checkPlan');
 const jwt = require('jsonwebtoken');
 const { notificarAudit } = require('./audit');
+const { enviarNotificacion } = require('../utils/push');
 
 const UNIT_CONVERSION = {
     'kg_g': 1000,
@@ -537,6 +538,17 @@ router.post('/movements', authenticate, async (req, res) => {
         }
 
         _notificarInventario(biz); // avisar a clientes SSE conectados
+
+        // Push notification: ajuste de inventario manual
+        if (type === 'ajuste' && authorizedEmployee) {
+            const tipoTexto = type === 'entrada' ? 'Entrada' : type === 'salida' ? 'Salida' : 'Ajuste';
+            enviarNotificacion(
+                biz,
+                'notif_ajuste_inventario',
+                `📦 ${tipoTexto} de inventario`,
+                `${authorizedEmployee.name} ajustó ${ingredient.name} → ${parseFloat(quantity)} ${ingredient.unit || ''}`
+            );
+        }
         const fullMovement = await InventoryMovement.findByPk(movement.id, {
             include: [{ model: Ingredient, as: 'ingredient', attributes: ['id', 'name', 'unit', 'stock'] }]
         });

@@ -80,6 +80,19 @@ router.put('/', authenticate, async (req, res) => {
             'puntos_activos', 'puntos_por_peso', 'puntos_bono_pedido', 'puntos_valor',
             'permisos_roles',
             'sucursal_id',
+            // Preferencias de notificaciones push
+            'notif_turno_abierto', 'notif_turno_cerrado',
+            'notif_diferencia_caja', 'notif_diferencia_caja_umbral',
+            'notif_turno_largo', 'notif_turno_largo_horas',
+            'notif_stock_cero',
+            'notif_ajuste_inventario',
+            'notif_venta_grande', 'notif_venta_grande_umbral',
+            'notif_descuento_pin',
+            'notif_pedido_cancelado', 'notif_venta_anulada',
+            'notif_nuevo_acceso',
+            'notif_resumen_diario', 'notif_resumen_diario_hora',
+            'notif_resumen_semanal',
+            'notif_cliente_nuevo', 'notif_puntos_canjeados',
         ];
         const incoming = {};
         for (const key of ALLOWED_KEYS) {

@@ -59,6 +59,11 @@ const User = sequelize.define('User', {
     stripe_subscription_id: {
         type: DataTypes.STRING,
         allowNull: true
+    },
+    // Push tokens de dispositivos móviles (JSON array de strings Expo)
+    push_tokens: {
+        type: DataTypes.TEXT,
+        allowNull: true
     }
 }, {
     tableName: 'users',

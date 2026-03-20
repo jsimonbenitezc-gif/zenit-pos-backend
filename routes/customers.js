@@ -5,6 +5,7 @@ const { authenticate, isOwner } = require('../middleware/auth');
 const { verifyEmployeePin } = require('../utils/verifyPin');
 const { Op } = require('sequelize');
 const { notificarAudit } = require('./audit');
+const { enviarNotificacion } = require('../utils/push');
 
 // GET /api/customers
 router.get('/', authenticate, async (req, res) => {
@@ -143,6 +144,15 @@ router.post('/', authenticate, async (req, res) => {
             return res.status(400).json({ error: 'Ya existe un cliente con ese teléfono' });
         }
         const customer = await Customer.create({ phone, name, address, notes, business_id: biz });
+
+        // Push notification: nuevo cliente registrado
+        enviarNotificacion(
+            biz,
+            'notif_cliente_nuevo',
+            '👤 Nuevo cliente registrado',
+            `${name}${phone ? ' · ' + phone : ''}`
+        );
+
         res.status(201).json(customer);
     } catch (error) {
         console.error('Error al crear cliente:', error);
@@ -231,11 +241,23 @@ router.patch('/:id/loyalty', authenticate, async (req, res) => {
         if (!customer) return res.status(404).json({ error: 'Cliente no encontrado' });
         const { points_delta, in_loyalty } = req.body;
         const updates = {};
+        const puntosAntes = customer.loyalty_points || 0;
         if (points_delta !== undefined) {
-            updates.loyalty_points = Math.max(0, (customer.loyalty_points || 0) + points_delta);
+            updates.loyalty_points = Math.max(0, puntosAntes + points_delta);
         }
         if (in_loyalty !== undefined) updates.in_loyalty = in_loyalty;
         await customer.update(updates);
+
+        // Push notification: cliente canjeó puntos (points_delta negativo = canje)
+        if (points_delta !== undefined && points_delta < 0) {
+            enviarNotificacion(
+                biz,
+                'notif_puntos_canjeados',
+                '🎁 Puntos canjeados',
+                `${customer.name} canjeó ${Math.abs(points_delta)} puntos · Saldo: ${updates.loyalty_points}`
+            );
+        }
+
         res.json(customer);
     } catch (error) {
         console.error('Error al actualizar fidelidad:', error);

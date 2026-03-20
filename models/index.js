@@ -207,6 +207,8 @@ const runMigrations = async () => {
     await safeAdd('users',     'stripe_subscription_id', { type: DataTypes.STRING, allowNull: true });
     // Auditoría: requiere PIN por descuento
     await safeAdd('discounts', 'requires_pin', { type: DataTypes.BOOLEAN, defaultValue: false, allowNull: false });
+    // Push notifications
+    await safeAdd('users', 'push_tokens', { type: DataTypes.TEXT, allowNull: true });
     // plan ENUM — se maneja con SQL directo para compatibilidad con PostgreSQL
     try {
         await sequelize.query(`DO $$ BEGIN

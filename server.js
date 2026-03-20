@@ -235,6 +235,7 @@ app.use('/api/branches', require('./routes/branches'));
 app.use('/api/tables',   require('./routes/tables'));
 app.use('/api/turnos',   require('./routes/turnos'));
 app.use('/api/audit',    require('./routes/audit'));
+app.use('/api/push',     require('./routes/push'));
 
 // Error handling
 app.use((err, req, res, next) => {
@@ -253,6 +254,87 @@ syncDatabase().then(() => {
         console.log(`🚀 Zenit POS API running on http://localhost:${PORT}`);
         console.log(`📝 Environment: ${process.env.NODE_ENV}`);
     });
+    iniciarCronJobs();
 });
+
+// ─── Cron jobs: notificaciones programadas ─────────────────────────────────
+function iniciarCronJobs() {
+    const cron = require('node-cron');
+    const { User, Turno, Order } = require('./models');
+    const { enviarNotificacion } = require('./utils/push');
+    const { Op } = require('sequelize');
+
+    // Resumen diario — corre cada hora en el minuto 0
+    // Envía solo a los usuarios que tienen esa hora configurada en notif_resumen_diario_hora
+    cron.schedule('0 * * * *', async () => {
+        const horaActual = new Date().getHours();
+        try {
+            const owners = await User.findAll({ where: { role: 'owner', active: true }, attributes: ['id', 'settings'] });
+            for (const owner of owners) {
+                let prefs = {};
+                try { prefs = JSON.parse(owner.settings || '{}'); } catch {}
+                if (prefs.notif_resumen_diario === false) continue;
+                const horaDeseada = parseInt(prefs.notif_resumen_diario_hora ?? 22);
+                if (horaActual !== horaDeseada) continue;
+
+                const hoy = new Date();
+                hoy.setHours(0, 0, 0, 0);
+                const pedidos = await Order.findAll({
+                    where: { business_id: owner.id, status: 'completado', createdAt: { [Op.gte]: hoy } },
+                    attributes: ['total']
+                });
+                const totalDia = pedidos.reduce((s, p) => s + parseFloat(p.total || 0), 0);
+                enviarNotificacion(owner.id, null, '📊 Resumen del día',
+                    `${pedidos.length} pedido(s) · $${totalDia.toFixed(2)} en ventas`);
+            }
+        } catch (err) { console.error('[Cron resumen diario]', err.message); }
+    });
+
+    // Resumen semanal — cada lunes a las 8 AM
+    cron.schedule('0 8 * * 1', async () => {
+        try {
+            const owners = await User.findAll({ where: { role: 'owner', active: true }, attributes: ['id', 'settings'] });
+            const haceSiete = new Date();
+            haceSiete.setDate(haceSiete.getDate() - 7);
+            haceSiete.setHours(0, 0, 0, 0);
+            for (const owner of owners) {
+                let prefs = {};
+                try { prefs = JSON.parse(owner.settings || '{}'); } catch {}
+                if (prefs.notif_resumen_semanal === false) continue;
+                const pedidos = await Order.findAll({
+                    where: { business_id: owner.id, status: 'completado', createdAt: { [Op.gte]: haceSiete } },
+                    attributes: ['total']
+                });
+                const total = pedidos.reduce((s, p) => s + parseFloat(p.total || 0), 0);
+                enviarNotificacion(owner.id, null, '📈 Resumen semanal',
+                    `${pedidos.length} pedido(s) esta semana · $${total.toFixed(2)} en ventas`);
+            }
+        } catch (err) { console.error('[Cron resumen semanal]', err.message); }
+    });
+
+    // Turno abierto demasiado tiempo — corre cada hora en el minuto 30
+    cron.schedule('30 * * * *', async () => {
+        try {
+            const owners = await User.findAll({ where: { role: 'owner', active: true }, attributes: ['id', 'settings'] });
+            for (const owner of owners) {
+                let prefs = {};
+                try { prefs = JSON.parse(owner.settings || '{}'); } catch {}
+                if (prefs.notif_turno_largo === false) continue;
+                const horas = parseFloat(prefs.notif_turno_largo_horas ?? 8);
+                const limite = new Date(Date.now() - horas * 60 * 60 * 1000);
+                const turnosLargos = await Turno.findAll({
+                    where: { business_id: owner.id, estado: 'abierto', apertura: { [Op.lte]: limite } }
+                });
+                for (const t of turnosLargos) {
+                    const horasAbiertas = ((Date.now() - new Date(t.apertura).getTime()) / 3600000).toFixed(1);
+                    enviarNotificacion(owner.id, null, '⏰ Turno abierto por mucho tiempo',
+                        `${t.cajero_nombre} lleva ${horasAbiertas}h con caja abierta`);
+                }
+            }
+        } catch (err) { console.error('[Cron turno largo]', err.message); }
+    });
+
+    console.log('✅ Cron jobs de notificaciones iniciados');
+}
 
 module.exports = app;

@@ -3,6 +3,7 @@ const router = express.Router();
 const { PrivilegedActionLog, Branch } = require('../models');
 const { authenticate, isOwner } = require('../middleware/auth');
 const jwt = require('jsonwebtoken');
+const { enviarNotificacion } = require('../utils/push');
 
 // ── SSE: notificaciones en tiempo real de nuevas acciones privilegiadas ────
 const _auditClients = new Map(); // businessId (string) → Set<Response>
@@ -107,6 +108,17 @@ router.post('/', authenticate, async (req, res) => {
         });
 
         _notificarAudit(biz);
+
+        // Push notification: descuento con PIN aplicado
+        if (action_type === 'apply_discount') {
+            enviarNotificacion(
+                biz,
+                'notif_descuento_pin',
+                '🔑 Descuento con PIN aplicado',
+                `${employee_name} aplicó: ${target_description || 'descuento'}`
+            );
+        }
+
         res.status(201).json(log);
     } catch (error) {
         console.error('Error al registrar acción de auditoría:', error);

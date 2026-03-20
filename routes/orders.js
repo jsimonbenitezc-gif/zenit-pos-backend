@@ -5,6 +5,7 @@ const { authenticate } = require('../middleware/auth');
 const { verifyEmployeePin } = require('../utils/verifyPin');
 const { Op } = require('sequelize');
 const { notificarAudit } = require('./audit');
+const { enviarNotificacion, getPrefs } = require('../utils/push');
 
 // Factores de conversión entre unidades compatibles
 const FACTORES_CONVERSION = {
@@ -284,6 +285,34 @@ router.post('/', authenticate, async (req, res) => {
             ]
         });
 
+        // Push notification: producto sin stock
+        const prefs = await getPrefs(biz);
+        if (prefs.notif_stock_cero !== false) {
+            for (const { product } of resolvedItems) {
+                // Recargar el producto para ver el stock actualizado post-transacción
+                const prodActualizado = await Product.findByPk(product.id, { attributes: ['id', 'name', 'stock'] });
+                if (prodActualizado && prodActualizado.stock <= 0) {
+                    enviarNotificacion(
+                        biz,
+                        null,
+                        '⚠️ Producto sin stock',
+                        `"${prodActualizado.name}" llegó a 0 unidades`
+                    );
+                }
+            }
+        }
+
+        // Push notification: venta grande (si supera umbral configurado)
+        const umbralVenta = parseFloat(prefs.notif_venta_grande_umbral ?? 500);
+        if (prefs.notif_venta_grande !== false && finalTotal >= umbralVenta) {
+            enviarNotificacion(
+                biz,
+                null,
+                '💰 Venta grande registrada',
+                `$${finalTotal.toFixed(2)} · ${resolvedItems.length} producto(s) · ${payment_method || 'efectivo'}`
+            );
+        }
+
         res.status(201).json(fullOrder);
     } catch (error) {
         await t.rollback();
@@ -459,6 +488,17 @@ router.put('/:id/status', authenticate, async (req, res) => {
             notificarAudit(biz);
         }
 
+        // Push notification: pedido cancelado
+        if (status === 'cancelado') {
+            const empNombre = authorizedEmployee ? (employee_name || authorizedEmployee.name) : 'Sin identificar';
+            enviarNotificacion(
+                biz,
+                'notif_pedido_cancelado',
+                '❌ Pedido cancelado',
+                `Pedido #${order.id} ($${parseFloat(order.total).toFixed(2)}) · cancelado por ${empNombre}`
+            );
+        }
+
         res.json(order);
     } catch (error) {
         res.status(500).json({ error: 'Error interno del servidor' });
@@ -552,6 +592,16 @@ router.delete('/:id', authenticate, async (req, res) => {
         }
 
         await t.commit();
+
+        // Push notification: venta anulada
+        const empNombreDelete = authorizedEmployee ? authorizedEmployee.name : 'Sin identificar';
+        enviarNotificacion(
+            biz,
+            'notif_venta_anulada',
+            '🗑️ Venta eliminada',
+            `Pedido #${order.id} ($${parseFloat(order.total).toFixed(2)}) eliminado por ${empNombreDelete}`
+        );
+
         res.json({ message: 'Pedido cancelado correctamente' });
     } catch (error) {
         await t.rollback();

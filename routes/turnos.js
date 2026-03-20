@@ -4,6 +4,7 @@ const { Op } = require('sequelize');
 const { Turno, Order } = require('../models');
 const { authenticate } = require('../middleware/auth');
 const jwt = require('jsonwebtoken');
+const { enviarNotificacion, getPrefs } = require('../utils/push');
 
 // ── SSE: notificaciones en tiempo real de cambios de turno ───────────────────
 const _turnoClients = new Map(); // businessId (string) → Set<Response>
@@ -109,6 +110,15 @@ router.post('/', authenticate, async (req, res) => {
         });
 
         _notificarTurno(req.user.business_id);
+
+        // Push notification: turno abierto
+        enviarNotificacion(
+            req.user.business_id,
+            'notif_turno_abierto',
+            '🟢 Turno abierto',
+            `${cajero_nombre || 'Sin nombre'} abrió caja con fondo de $${parseFloat(fondo_inicial || 0).toFixed(2)}`
+        );
+
         res.status(201).json(turno);
     } catch (error) {
         console.error('Error al abrir turno:', error);
@@ -218,6 +228,31 @@ router.put('/:id/cerrar', authenticate, async (req, res) => {
         });
 
         _notificarTurno(req.user.business_id);
+
+        // Push notification: turno cerrado
+        const biz = req.user.business_id;
+        const difAbs = Math.abs(parseFloat(diferencia.toFixed(2)));
+        const prefs = await getPrefs(biz);
+        const umbral = parseFloat(prefs.notif_diferencia_caja_umbral ?? 50);
+
+        enviarNotificacion(
+            biz,
+            'notif_turno_cerrado',
+            '🔴 Turno cerrado',
+            `${turno.cajero_nombre} cerró caja · ${pedidos.length} pedidos · $${parseFloat(totalVentas.toFixed(2))} en ventas`
+        );
+
+        // Notificación extra si la diferencia de caja supera el umbral configurado
+        if (prefs.notif_diferencia_caja !== false && difAbs >= umbral) {
+            const signo = diferencia > 0 ? '+' : '-';
+            enviarNotificacion(
+                biz,
+                null, // ya validamos la pref arriba
+                '⚠️ Diferencia de caja',
+                `${turno.cajero_nombre} cerró con diferencia de ${signo}$${difAbs.toFixed(2)}`
+            );
+        }
+
         res.json(turno);
     } catch (error) {
         console.error('Error al cerrar turno:', error);
