@@ -6,6 +6,7 @@ const { verifyEmployeePin } = require('../utils/verifyPin');
 const { Op } = require('sequelize');
 const { notificarAudit } = require('./audit');
 const { enviarNotificacion, getPrefs } = require('../utils/push');
+const { notificarInventario } = require('./inventory');
 const jwt = require('jsonwebtoken');
 
 // ── SSE: notificaciones en tiempo real de cambios en pedidos/mesas ─────────────
@@ -315,6 +316,7 @@ router.post('/', authenticate, async (req, res) => {
 
         await t.commit();
         notificarOrders(biz);
+        notificarInventario(biz);
 
         const fullOrder = await Order.findByPk(order.id, {
             include: [
@@ -428,6 +430,7 @@ router.post('/:id/items', authenticate, async (req, res) => {
 
         await t.commit();
         notificarOrders(biz);
+        notificarInventario(biz);
 
         const updated = await Order.findByPk(order.id, {
             include: [{
