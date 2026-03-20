@@ -6,6 +6,50 @@ const { verifyEmployeePin } = require('../utils/verifyPin');
 const { Op } = require('sequelize');
 const { notificarAudit } = require('./audit');
 const { enviarNotificacion, getPrefs } = require('../utils/push');
+const jwt = require('jsonwebtoken');
+
+// ── SSE: notificaciones en tiempo real de cambios en pedidos/mesas ─────────────
+const _ordersClients = new Map(); // businessId → Set<Response>
+
+function notificarOrders(businessId) {
+    const clients = _ordersClients.get(String(businessId));
+    if (!clients || clients.size === 0) return;
+    const msg = `data: {}\n\n`;
+    for (const res of clients) {
+        try { res.write(msg); } catch { /* cliente desconectado */ }
+    }
+}
+
+// Auth via query param ?token=JWT (EventSource no soporta headers)
+router.get('/events', (req, res) => {
+    const token = req.query.token;
+    if (!token) return res.status(401).end();
+    let businessId;
+    try {
+        const payload = jwt.verify(token, process.env.JWT_SECRET);
+        businessId = payload.business_id;
+    } catch {
+        return res.status(401).end();
+    }
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders();
+
+    const heartbeat = setInterval(() => {
+        try { res.write(': ping\n\n'); } catch { clearInterval(heartbeat); }
+    }, 25000);
+
+    const biz = String(businessId);
+    if (!_ordersClients.has(biz)) _ordersClients.set(biz, new Set());
+    _ordersClients.get(biz).add(res);
+
+    req.on('close', () => {
+        clearInterval(heartbeat);
+        _ordersClients.get(biz)?.delete(res);
+    });
+});
 
 // Factores de conversión entre unidades compatibles
 const FACTORES_CONVERSION = {
@@ -273,6 +317,7 @@ router.post('/', authenticate, async (req, res) => {
         }
 
         await t.commit();
+        notificarOrders(biz);
 
         const fullOrder = await Order.findByPk(order.id, {
             include: [
@@ -375,6 +420,7 @@ router.post('/:id/items', authenticate, async (req, res) => {
         await order.update({ total: newTotal }, { transaction: t });
 
         await t.commit();
+        notificarOrders(biz);
 
         const updated = await Order.findByPk(order.id, {
             include: [{
@@ -473,6 +519,7 @@ router.put('/:id/status', authenticate, async (req, res) => {
 
         const beforeStatus = order.status;
         await order.update({ status });
+        notificarOrders(biz);
 
         if (authorizedEmployee && status === 'cancelado') {
             await PrivilegedActionLog.create({
