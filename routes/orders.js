@@ -333,11 +333,13 @@ router.post('/', authenticate, async (req, res) => {
             ]
         });
 
-        // Push notification: producto sin stock
+        // Push notification: producto sin stock (solo para productos SIN receta;
+        // los que tienen receta se controlan por ingredientes, no por product.stock)
         const prefs = await getPrefs(biz);
         if (prefs.notif_stock_cero !== false) {
             for (const { product } of resolvedItems) {
-                // Recargar el producto para ver el stock actualizado post-transacción
+                const hasRecipe = await ProductRecipe.count({ where: { product_id: product.id } });
+                if (hasRecipe > 0) continue; // stock se mide por ingredientes, no por product.stock
                 const prodActualizado = await Product.findByPk(product.id, { attributes: ['id', 'name', 'stock'] });
                 if (prodActualizado && prodActualizado.stock <= 0) {
                     enviarNotificacion(
