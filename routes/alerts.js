@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { Product, Order, sequelize } = require('../models');
+const { Ingredient, Branch, Order, sequelize } = require('../models');
 const { authenticate } = require('../middleware/auth');
 const { Op } = require('sequelize');
 
@@ -14,16 +14,43 @@ router.get('/', authenticate, async (req, res) => {
         const hoy = new Date();
         hoy.setHours(0, 0, 0, 0);
 
-        // 1. Stock crítico
-        const productosBajoStock = await Product.findAll({
-            where: { business_id: biz, active: true, stock: { [Op.lte]: 5 } },
-            attributes: ['name', 'stock']
-        });
-        productosBajoStock.forEach(p => {
-            if (p.stock <= 0) {
-                alertas.push({ tipo: 'stock', nivel: 'peligro', icono: '🔴', mensaje: `Sin stock: "${p.name}"` });
+        // 1. Stock crítico de insumos (por sucursal)
+        const [ingredients, branches] = await Promise.all([
+            Ingredient.findAll({
+                where: { business_id: biz, active: true },
+                attributes: ['name', 'stock', 'min_stock', 'branch_stocks']
+            }),
+            Branch.findAll({
+                where: { business_id: biz, active: true },
+                attributes: ['id', 'name']
+            })
+        ]);
+
+        const branchMap = {};
+        branches.forEach(b => { branchMap[String(b.id)] = b.name; });
+
+        ingredients.forEach(ing => {
+            if (!ing.min_stock || ing.min_stock <= 0) return; // Sin mínimo definido: ignorar
+            const bs = ing.branch_stocks || {};
+            if (Object.keys(bs).length > 0) {
+                // Stock por sucursal
+                Object.entries(bs).forEach(([branchId, stock]) => {
+                    const branchName = branchMap[branchId] || `Sucursal ${branchId}`;
+                    const stockNum = parseFloat(stock) || 0;
+                    if (stockNum <= 0) {
+                        alertas.push({ tipo: 'stock', nivel: 'peligro', icono: '🔴', mensaje: `Sin stock en ${branchName}: "${ing.name}"` });
+                    } else if (stockNum <= ing.min_stock) {
+                        alertas.push({ tipo: 'stock', nivel: 'advertencia', icono: '🟡', mensaje: `Stock bajo en ${branchName} (${stockNum}): "${ing.name}"` });
+                    }
+                });
             } else {
-                alertas.push({ tipo: 'stock', nivel: 'advertencia', icono: '🟡', mensaje: `Stock bajo (${p.stock} ud.): "${p.name}"` });
+                // Sin branch_stocks: usar stock global
+                const stockNum = parseFloat(ing.stock) || 0;
+                if (stockNum <= 0) {
+                    alertas.push({ tipo: 'stock', nivel: 'peligro', icono: '🔴', mensaje: `Sin stock: "${ing.name}"` });
+                } else if (stockNum <= ing.min_stock) {
+                    alertas.push({ tipo: 'stock', nivel: 'advertencia', icono: '🟡', mensaje: `Stock bajo (${stockNum}): "${ing.name}"` });
+                }
             }
         });
 

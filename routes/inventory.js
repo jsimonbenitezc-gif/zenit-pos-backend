@@ -101,14 +101,26 @@ router.get('/ingredients', authenticate, async (req, res) => {
                     // Sin branch_stocks aún: usar stock global como fallback
                     plain.stock = parseFloat(ing.stock) || 0;
                 } else {
-                    // Otras sucursales no tienen stock propio → 0
+                    // Sucursal no encontrada en branch_stocks → 0
                     plain.stock = 0;
                 }
                 return plain;
             });
             return res.json(result);
         }
-        res.json(ingredients);
+        // Sin branch_id: el campo global 'stock' puede estar desactualizado si se usa branch_stocks.
+        // Calcular stock real sumando todos los valores de branch_stocks.
+        const result = ingredients.map(ing => {
+            const plain = ing.toJSON();
+            const bs = ing.branch_stocks || {};
+            const vals = Object.values(bs);
+            if (vals.length > 0) {
+                plain.stock = vals.reduce((s, v) => s + (parseFloat(v) || 0), 0);
+            }
+            // Si branch_stocks está vacío usa el stock global (ya viene en plain.stock)
+            return plain;
+        });
+        res.json(result);
     } catch (error) {
         res.status(500).json({ error: 'Error interno del servidor' });
     }
