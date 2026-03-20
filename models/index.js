@@ -111,6 +111,9 @@ const setupRelations = () => {
     // Table <-> User (business)
     models.User.hasMany(models.Table, { foreignKey: 'business_id', as: 'tables' });
     models.Table.belongsTo(models.User, { foreignKey: 'business_id', as: 'business' });
+
+    // PrivilegedActionLog <-> Branch
+    models.PrivilegedActionLog.belongsTo(models.Branch, { foreignKey: 'branch_id', as: 'branch' });
 };
 
 const { DataTypes } = require('sequelize');
@@ -156,6 +159,7 @@ const runMigrations = async () => {
     await safeAdd('orders',    'branch_id',           { type: DataTypes.INTEGER, allowNull: true });
     await safeAdd('orders',    'table_id',            { type: DataTypes.INTEGER, allowNull: true });
     await safeAdd('orders',    'guests',              { type: DataTypes.INTEGER, allowNull: true });
+    await safeAdd('orders',    'discount_amount',     { type: DataTypes.DECIMAL(10,2), defaultValue: 0 });
     await safeAdd('users',     'branch_id',           { type: DataTypes.INTEGER, allowNull: true });
     await safeAdd('customers', 'loyalty_points',      { type: DataTypes.INTEGER, defaultValue: 0 });
     await safeAdd('customers', 'in_loyalty',          { type: DataTypes.BOOLEAN, defaultValue: false });

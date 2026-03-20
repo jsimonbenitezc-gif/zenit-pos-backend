@@ -15,6 +15,7 @@ const { authenticate, isOwner } = require('../middleware/auth');
 const { verifyEmployeePin } = require('../utils/verifyPin');
 const { requirePremium } = require('../middleware/checkPlan');
 const jwt = require('jsonwebtoken');
+const { notificarAudit } = require('./audit');
 
 const UNIT_CONVERSION = {
     'kg_g': 1000,
@@ -532,6 +533,7 @@ router.post('/movements', authenticate, async (req, res) => {
                 before_data: JSON.stringify({ ingredient_id, name: ingredient.name, stock: stockAntes }),
                 after_data: JSON.stringify({ ingredient_id, name: ingredient.name, stock: parseFloat(quantity), reason: reason || null })
             });
+            notificarAudit(biz);
         }
 
         _notificarInventario(biz); // avisar a clientes SSE conectados

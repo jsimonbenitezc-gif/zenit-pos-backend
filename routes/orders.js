@@ -4,6 +4,7 @@ const { Order, OrderItem, Product, Customer, Table, ProductRecipe, Ingredient, P
 const { authenticate } = require('../middleware/auth');
 const { verifyEmployeePin } = require('../utils/verifyPin');
 const { Op } = require('sequelize');
+const { notificarAudit } = require('./audit');
 
 // Factores de conversión entre unidades compatibles
 const FACTORES_CONVERSION = {
@@ -184,7 +185,7 @@ router.post('/', authenticate, async (req, res) => {
             customer_id, customer_temp_info, items, total,
             payment_method, order_type, reference,
             delivery_address, maps_link, notes, branch_id,
-            table_id, guests,
+            table_id, guests, discount_amount,
         } = req.body;
 
         // Permitir pedido vacío cuando viene con table_id (mesa reservada, los items se agregan después)
@@ -232,10 +233,14 @@ router.post('/', authenticate, async (req, res) => {
 
         calculatedTotal = parseFloat(calculatedTotal.toFixed(2));
 
+        const discountAmt = parseFloat(Math.min(Math.max(parseFloat(discount_amount) || 0, 0), calculatedTotal).toFixed(2));
+        const finalTotal = parseFloat((calculatedTotal - discountAmt).toFixed(2));
+
         const order = await Order.create({
             customer_id,
             customer_temp_info,
-            total: calculatedTotal,
+            total: finalTotal,
+            discount_amount: discountAmt,
             status: 'registrado',
             payment_method: payment_method || 'efectivo',
             order_type: order_type || 'comer',
@@ -451,6 +456,7 @@ router.put('/:id/status', authenticate, async (req, res) => {
                 before_data: JSON.stringify({ id: order.id, status: beforeStatus, total: order.total }),
                 after_data: JSON.stringify({ id: order.id, status: 'cancelado', total: order.total })
             });
+            notificarAudit(biz);
         }
 
         res.json(order);
@@ -542,6 +548,7 @@ router.delete('/:id', authenticate, async (req, res) => {
                 before_data: JSON.stringify(beforeData),
                 after_data: JSON.stringify({ ...beforeData, status: 'cancelado' })
             }, { transaction: t });
+            notificarAudit(biz);
         }
 
         await t.commit();

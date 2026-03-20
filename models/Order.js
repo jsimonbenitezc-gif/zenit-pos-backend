@@ -58,6 +58,11 @@ const Order = sequelize.define('Order', {
     branch_id: {
         type: DataTypes.INTEGER,
         allowNull: true
+    },
+    discount_amount: {
+        type: DataTypes.DECIMAL(10, 2),
+        allowNull: true,
+        defaultValue: 0
     }
 }, {
     tableName: 'orders',

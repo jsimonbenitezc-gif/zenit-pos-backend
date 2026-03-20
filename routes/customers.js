@@ -4,6 +4,7 @@ const { Customer, Order, PrivilegedActionLog, User, sequelize } = require('../mo
 const { authenticate, isOwner } = require('../middleware/auth');
 const { verifyEmployeePin } = require('../utils/verifyPin');
 const { Op } = require('sequelize');
+const { notificarAudit } = require('./audit');
 
 // GET /api/customers
 router.get('/', authenticate, async (req, res) => {
@@ -34,7 +35,7 @@ router.get('/with-stats', authenticate, async (req, res) => {
                 required: false
             }],
             attributes: [
-                'id', 'phone', 'name', 'address', 'notes', 'createdAt',
+                'id', 'phone', 'name', 'address', 'notes', 'createdAt', 'loyalty_points', 'in_loyalty',
                 [sequelize.fn('COUNT', sequelize.col('orders.id')), 'total_compras'],
                 [sequelize.fn('COALESCE', sequelize.fn('SUM', sequelize.col('orders.total')), 0), 'monto_total']
             ],
@@ -212,6 +213,7 @@ router.put('/:id', authenticate, async (req, res) => {
                 before_data: JSON.stringify(beforeData),
                 after_data: JSON.stringify(afterData)
             });
+            notificarAudit(biz);
         }
 
         res.json(customer);
