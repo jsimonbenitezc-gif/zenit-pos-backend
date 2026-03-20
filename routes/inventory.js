@@ -76,6 +76,92 @@ router.get('/events', (req, res) => {
     });
 });
 
+// GET /api/inventory/products-stock?branch_id=X
+// Calcula stock disponible de cada producto basado en niveles de ingredientes y recetas.
+// Devuelve { productId: cantidad } — null significa sin receta (usar product.stock del producto).
+router.get('/products-stock', authenticate, async (req, res) => {
+    try {
+        const biz = req.user.business_id;
+        const branchId = req.query.branch_id ? String(req.query.branch_id) : null;
+        const { Op } = require('sequelize');
+
+        const products = await Product.findAll({ where: { business_id: biz, active: true }, attributes: ['id'] });
+        const productIds = products.map(p => p.id);
+        if (productIds.length === 0) return res.json({});
+
+        const allRecipes = await ProductRecipe.findAll({ where: { product_id: { [Op.in]: productIds } } });
+
+        const recipesByProduct = {};
+        for (const r of allRecipes) {
+            if (!recipesByProduct[r.product_id]) recipesByProduct[r.product_id] = [];
+            recipesByProduct[r.product_id].push(r);
+        }
+
+        const ingIds  = [...new Set(allRecipes.filter(r => r.item_type === 'ingredient').map(r => r.item_id))];
+        const prepIds = [...new Set(allRecipes.filter(r => r.item_type === 'preparation').map(r => r.item_id))];
+
+        const ings = ingIds.length > 0
+            ? await Ingredient.findAll({ where: { id: { [Op.in]: ingIds }, business_id: biz } })
+            : [];
+        const ingMap = {};
+        for (const ing of ings) ingMap[ing.id] = ing;
+
+        const prepItemsMap = {};
+        if (prepIds.length > 0) {
+            const pItems = await PreparationItem.findAll({
+                where: { preparation_id: { [Op.in]: prepIds } },
+                include: [{ model: Ingredient, as: 'ingredient' }]
+            });
+            for (const pi of pItems) {
+                if (!prepItemsMap[pi.preparation_id]) prepItemsMap[pi.preparation_id] = [];
+                prepItemsMap[pi.preparation_id].push(pi);
+            }
+        }
+
+        function getStock(ing) {
+            if (!branchId) return parseFloat(ing.stock) || 0;
+            const bs = ing.branch_stocks || {};
+            return Object.keys(bs).length > 0
+                ? parseFloat(bs[branchId] ?? 0)
+                : parseFloat(ing.stock) || 0;
+        }
+
+        const result = {};
+        for (const productId of productIds) {
+            const recipeItems = recipesByProduct[productId];
+            if (!recipeItems || recipeItems.length === 0) { result[productId] = null; continue; }
+
+            let min = Infinity;
+            for (const item of recipeItems) {
+                if (item.item_type === 'ingredient') {
+                    const ing = ingMap[item.item_id];
+                    if (!ing) continue;
+                    const needed = convertUnit(parseFloat(item.quantity), item.unit_recipe, ing.unit);
+                    if (needed <= 0) continue;
+                    const possible = Math.floor(getStock(ing) / needed);
+                    if (possible < min) min = possible;
+                } else if (item.item_type === 'preparation') {
+                    const pItems = prepItemsMap[item.item_id] || [];
+                    const qtyPrep = parseFloat(item.quantity);
+                    for (const pi of pItems) {
+                        if (!pi.ingredient) continue;
+                        const needed = convertUnit(parseFloat(pi.quantity), pi.unit_recipe, pi.ingredient.unit) * qtyPrep;
+                        if (needed <= 0) continue;
+                        const possible = Math.floor(getStock(pi.ingredient) / needed);
+                        if (possible < min) min = possible;
+                    }
+                }
+            }
+            result[productId] = min === Infinity ? null : Math.max(0, min);
+        }
+
+        res.json(result);
+    } catch (error) {
+        console.error('products-stock error:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
 // Todas las rutas de inventario requieren plan premium
 router.use(authenticate, requirePremium);
 
