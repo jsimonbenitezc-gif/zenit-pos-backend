@@ -1,5 +1,7 @@
 const express = require('express');
 const router = express.Router();
+const crypto = require('crypto');
+const bcrypt = require('bcrypt');
 const { User } = require('../models');
 const { authenticate } = require('../middleware/auth');
 const jwt = require('jsonwebtoken');
@@ -105,6 +107,95 @@ router.put('/', authenticate, async (req, res) => {
         res.json(updated);
     } catch (error) {
         console.error('Error al guardar ajustes:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// POST /api/settings/verify-pin — Verificar PIN de perfil (permisos_roles) con bcrypt
+// Soporta SHA256 legacy (desktop) y migra automáticamente a bcrypt al verificar.
+router.post('/verify-pin', authenticate, async (req, res) => {
+    try {
+        const { role, pin } = req.body;
+        if (!role || !pin) {
+            return res.status(400).json({ error: 'role y pin son requeridos' });
+        }
+        if (!/^\d{4,8}$/.test(pin)) {
+            return res.status(400).json({ error: 'El PIN debe ser entre 4 y 8 dígitos numéricos' });
+        }
+
+        // Leer permisos_roles del owner del negocio
+        const ownerId = req.user.business_id;
+        const owner = await User.findByPk(ownerId, { attributes: ['id', 'settings'] });
+        if (!owner) return res.status(404).json({ error: 'Negocio no encontrado' });
+
+        const settings = owner.settings ? JSON.parse(owner.settings) : {};
+        const permisosRoles = settings.permisos_roles || {};
+
+        // Resolver permisos efectivos (puede haber por sucursal)
+        let permisos = permisosRoles;
+        // Si es un objeto con claves __b_ (sucursales), buscar en todas
+        const branchKeys = Object.keys(permisosRoles).filter(k => k.startsWith('__b_'));
+        if (branchKeys.length > 0) {
+            // Primero intentar sin sucursal (nivel global)
+            const globalPermisos = Object.fromEntries(
+                Object.entries(permisosRoles).filter(([k]) => !k.startsWith('__b_'))
+            );
+            // Si el role existe a nivel global, usar esos
+            if (globalPermisos[role]) {
+                permisos = globalPermisos;
+            } else {
+                // Buscar en cada sucursal
+                for (const bk of branchKeys) {
+                    if (permisosRoles[bk]?.[role]) {
+                        permisos = permisosRoles[bk];
+                        break;
+                    }
+                }
+            }
+        }
+
+        const rolData = permisos[role];
+        if (!rolData || !rolData.pin_set) {
+            return res.json({ valid: false });
+        }
+
+        let valid = false;
+
+        // 1) Intentar bcrypt primero (ya migrado)
+        if (rolData.pin_bcrypt) {
+            valid = await bcrypt.compare(pin, rolData.pin_bcrypt);
+        }
+        // 2) Fallback a SHA256 legacy (desktop genera estos)
+        else if (rolData.pin) {
+            const sha256Hash = crypto.createHash('sha256').update(pin).digest('hex');
+            valid = (sha256Hash === rolData.pin);
+
+            // Migración automática: si el SHA256 coincide, guardar bcrypt
+            if (valid) {
+                rolData.pin_bcrypt = await bcrypt.hash(pin, 10);
+                await owner.update({ settings: JSON.stringify(settings) });
+                _notificarSettings(ownerId);
+            }
+        }
+
+        res.json({ valid });
+    } catch (error) {
+        console.error('Error en verify-pin (settings):', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// POST /api/settings/hash-pin — Generar hash bcrypt de un PIN (para crear/actualizar PINs)
+router.post('/hash-pin', authenticate, async (req, res) => {
+    try {
+        const { pin } = req.body;
+        if (!pin || !/^\d{4,8}$/.test(pin)) {
+            return res.status(400).json({ error: 'El PIN debe ser entre 4 y 8 dígitos numéricos' });
+        }
+        const hash = await bcrypt.hash(pin, 10);
+        res.json({ hash });
+    } catch (error) {
+        console.error('Error en hash-pin:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
