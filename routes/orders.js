@@ -104,7 +104,7 @@ async function descontarIngredientesDeReceta(productId, qty, t, branchId = null)
 
     for (const item of recetaItems) {
         if (item.item_type === 'ingredient') {
-            const ingrediente = await Ingredient.findByPk(item.item_id, { transaction: t });
+            const ingrediente = await Ingredient.findByPk(item.item_id, { transaction: t, lock: t.LOCK.UPDATE });
             if (!ingrediente) continue;
             const cantDescontar = convertirUnidad(parseFloat(item.quantity), item.unit_recipe, ingrediente) * qty;
             const stockActual = getBranchStock(ingrediente, branchId);
@@ -114,7 +114,8 @@ async function descontarIngredientesDeReceta(productId, qty, t, branchId = null)
             const prepItems = await PreparationItem.findAll({
                 where: { preparation_id: item.item_id },
                 include: [{ model: Ingredient, as: 'ingredient' }],
-                transaction: t
+                transaction: t,
+                lock: t.LOCK.UPDATE
             });
             const cantPrep = parseFloat(item.quantity) * qty;
             for (const pi of prepItems) {
@@ -133,7 +134,7 @@ async function restaurarIngredientesDeReceta(productId, qty, t, branchId = null)
 
     for (const item of recetaItems) {
         if (item.item_type === 'ingredient') {
-            const ingrediente = await Ingredient.findByPk(item.item_id, { transaction: t });
+            const ingrediente = await Ingredient.findByPk(item.item_id, { transaction: t, lock: t.LOCK.UPDATE });
             if (!ingrediente) continue;
             const cantRestaurar = convertirUnidad(parseFloat(item.quantity), item.unit_recipe, ingrediente) * qty;
             const stockActual = getBranchStock(ingrediente, branchId);
@@ -143,7 +144,8 @@ async function restaurarIngredientesDeReceta(productId, qty, t, branchId = null)
             const prepItems = await PreparationItem.findAll({
                 where: { preparation_id: item.item_id },
                 include: [{ model: Ingredient, as: 'ingredient' }],
-                transaction: t
+                transaction: t,
+                lock: t.LOCK.UPDATE
             });
             const cantPrep = parseFloat(item.quantity) * qty;
             for (const pi of prepItems) {
@@ -430,6 +432,7 @@ router.post('/:id/items', authenticate, async (req, res) => {
         const order = await Order.findOne({
             where: { id: req.params.id, business_id: biz, status: 'registrado' },
             transaction: t,
+            lock: t.LOCK.UPDATE,
         });
         if (!order) {
             await t.rollback();
