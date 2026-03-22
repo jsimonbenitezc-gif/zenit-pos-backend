@@ -205,8 +205,9 @@ router.get('/dashboard', authenticate, async (req, res) => {
             where: sequelize.literal(`(
                 SELECT COUNT(*) FROM orders
                 WHERE orders.customer_id = "Customer"."id"
-                AND orders.business_id = ${parseInt(biz, 10)}
-            ) >= 3`)
+                AND orders.business_id = $biz
+            ) >= 3`),
+            bind: { biz }
         });
 
         // 10. VENTAS POR HORA HOY (para gráfica de 24h)

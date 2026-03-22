@@ -2,6 +2,16 @@ const express = require('express');
 const router = express.Router();
 const { Product, Category } = require('../models');
 const { authenticate, isOwner } = require('../middleware/auth');
+const rateLimit = require('express-rate-limit');
+
+// Protección: máximo 30 productos por minuto por IP
+const createProductLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 30,
+    message: { error: 'Demasiadas solicitudes de creación de productos. Intenta de nuevo en un minuto.' },
+    standardHeaders: true,
+    legacyHeaders: false
+});
 
 // GET /api/products
 router.get('/', authenticate, async (req, res) => {
@@ -113,7 +123,7 @@ router.get('/:id', authenticate, async (req, res) => {
 });
 
 // POST /api/products
-router.post('/', authenticate, isOwner, async (req, res) => {
+router.post('/', createProductLimiter, authenticate, isOwner, async (req, res) => {
     try {
         const biz = req.user.business_id;
         const { name, description, price, stock, category_id, emoji, image } = req.body;

@@ -8,6 +8,16 @@ const { notificarAudit } = require('./audit');
 const { enviarNotificacion, getPrefs } = require('../utils/push');
 const { notificarInventario } = require('./inventory');
 const jwt = require('jsonwebtoken');
+const rateLimit = require('express-rate-limit');
+
+// Protección: máximo 60 pedidos por minuto por IP
+const createOrderLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 60,
+    message: { error: 'Demasiadas solicitudes de creación de pedidos. Intenta de nuevo en un minuto.' },
+    standardHeaders: true,
+    legacyHeaders: false
+});
 
 // ── SSE: notificaciones en tiempo real de cambios en pedidos/mesas ─────────────
 const _ordersClients = new Map(); // businessId → Set<Response>
@@ -222,7 +232,7 @@ router.get('/:id', authenticate, async (req, res) => {
 });
 
 // POST /api/orders
-router.post('/', authenticate, async (req, res) => {
+router.post('/', createOrderLimiter, authenticate, async (req, res) => {
     const t = await sequelize.transaction();
 
     try {

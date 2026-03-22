@@ -6,6 +6,16 @@ const { verifyEmployeePin } = require('../utils/verifyPin');
 const { Op } = require('sequelize');
 const { notificarAudit } = require('./audit');
 const { enviarNotificacion } = require('../utils/push');
+const rateLimit = require('express-rate-limit');
+
+// Protección: máximo 30 clientes por minuto por IP
+const createCustomerLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 30,
+    message: { error: 'Demasiadas solicitudes de creación de clientes. Intenta de nuevo en un minuto.' },
+    standardHeaders: true,
+    legacyHeaders: false
+});
 
 // GET /api/customers
 router.get('/', authenticate, async (req, res) => {
@@ -131,7 +141,7 @@ router.get('/:id', authenticate, async (req, res) => {
 });
 
 // POST /api/customers
-router.post('/', authenticate, async (req, res) => {
+router.post('/', createCustomerLimiter, authenticate, async (req, res) => {
     try {
         const biz = req.user.business_id;
         const { phone, name, address, notes } = req.body;
