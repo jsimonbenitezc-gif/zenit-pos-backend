@@ -127,6 +127,35 @@ async function descontarIngredientesDeReceta(productId, qty, t, branchId = null)
     }
 }
 
+async function restaurarIngredientesDeReceta(productId, qty, t, branchId = null) {
+    const recetaItems = await ProductRecipe.findAll({ where: { product_id: productId }, transaction: t });
+    if (!recetaItems.length) return;
+
+    for (const item of recetaItems) {
+        if (item.item_type === 'ingredient') {
+            const ingrediente = await Ingredient.findByPk(item.item_id, { transaction: t });
+            if (!ingrediente) continue;
+            const cantRestaurar = convertirUnidad(parseFloat(item.quantity), item.unit_recipe, ingrediente) * qty;
+            const stockActual = getBranchStock(ingrediente, branchId);
+            await setBranchStock(ingrediente, branchId, stockActual + cantRestaurar, t);
+
+        } else if (item.item_type === 'preparation') {
+            const prepItems = await PreparationItem.findAll({
+                where: { preparation_id: item.item_id },
+                include: [{ model: Ingredient, as: 'ingredient' }],
+                transaction: t
+            });
+            const cantPrep = parseFloat(item.quantity) * qty;
+            for (const pi of prepItems) {
+                if (!pi.ingredient) continue;
+                const cantRestaurar = convertirUnidad(parseFloat(pi.quantity), pi.unit_recipe, pi.ingredient) * cantPrep;
+                const stockActual = getBranchStock(pi.ingredient, branchId);
+                await setBranchStock(pi.ingredient, branchId, stockActual + cantRestaurar, t);
+            }
+        }
+    }
+}
+
 // GET /api/orders
 router.get('/', authenticate, async (req, res) => {
     try {
@@ -578,6 +607,21 @@ router.put('/:id', authenticate, async (req, res) => {
         if (status !== undefined && !['registrado', 'completado', 'entregado', 'cancelado'].includes(status)) {
             return res.status(400).json({ error: 'Estado inválido. Use: registrado, completado, entregado o cancelado' });
         }
+
+        // Validar transiciones de estado permitidas
+        if (status !== undefined && status !== order.status) {
+            const transicionesValidas = {
+                registrado: ['completado', 'cancelado'],
+                completado: ['entregado', 'cancelado'],
+                entregado: [],
+                cancelado: []
+            };
+            const permitidas = transicionesValidas[order.status] || [];
+            if (!permitidas.includes(status)) {
+                return res.status(400).json({ error: `No se puede cambiar de "${order.status}" a "${status}"` });
+            }
+        }
+
         await order.update({ status, payment_method, order_type, reference, delivery_address, maps_link, notes });
         res.json(order);
     } catch (error) {
@@ -616,6 +660,11 @@ router.delete('/:id', authenticate, async (req, res) => {
             return res.status(404).json({ error: 'Pedido no encontrado' });
         }
 
+        if (order.status === 'cancelado') {
+            await t.rollback();
+            return res.status(400).json({ error: 'Este pedido ya está cancelado' });
+        }
+
         // Capturar estado antes de la cancelación (para auditoría)
         const beforeData = {
             id: order.id,
@@ -624,6 +673,15 @@ router.delete('/:id', authenticate, async (req, res) => {
             payment_method: order.payment_method,
             order_type: order.order_type
         };
+
+        // Restaurar ingredientes solo si el pedido estaba en "registrado"
+        // (aún no se preparó, así que los insumos no se consumieron realmente)
+        if (order.status === 'registrado') {
+            for (const item of order.items) {
+                const qty = Math.max(1, parseInt(item.quantity) || 1);
+                await restaurarIngredientesDeReceta(item.product_id, qty, t, order.branch_id || null);
+            }
+        }
 
         await order.update({ status: 'cancelado' }, { transaction: t });
 
