@@ -273,6 +273,7 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
             payment_method, order_type, reference,
             delivery_address, maps_link, notes, branch_id,
             table_id, guests, discount_amount,
+            loyalty_points_used, loyalty_points_earned,
         } = req.body;
 
         // Permitir pedido vacío cuando viene con table_id (mesa reservada, los items se agregan después)
@@ -353,6 +354,26 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
 
             // Descontar insumos según la receta del producto (si tiene receta)
             await descontarIngredientesDeReceta(product.id, qty, t, branch_id || null);
+        }
+
+        // Actualizar puntos de fidelidad dentro de la misma transacción
+        if (customer_id && (loyalty_points_used || loyalty_points_earned)) {
+            const customer = await Customer.findOne({
+                where: { id: customer_id, business_id: biz },
+                transaction: t,
+                lock: t.LOCK.UPDATE,
+            });
+            if (customer) {
+                const puntosActuales = customer.loyalty_points || 0;
+                let nuevoPuntaje = puntosActuales;
+                if (loyalty_points_used && loyalty_points_used > 0) {
+                    nuevoPuntaje = Math.max(0, nuevoPuntaje - loyalty_points_used);
+                }
+                if (loyalty_points_earned && loyalty_points_earned > 0) {
+                    nuevoPuntaje += loyalty_points_earned;
+                }
+                await customer.update({ loyalty_points: nuevoPuntaje }, { transaction: t });
+            }
         }
 
         await t.commit();
