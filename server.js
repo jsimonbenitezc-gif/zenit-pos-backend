@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const helmet = require('helmet');
 const { syncDatabase } = require('./models');
 
 const app = express();
@@ -25,6 +26,14 @@ app.use(cors({
     },
     credentials: true
 }));
+
+// Headers de seguridad (helmet)
+// contentSecurityPolicy desactivado porque el KDS usa inline scripts/styles
+app.use(helmet({
+    contentSecurityPolicy: false,
+    crossOriginEmbedderPolicy: false,
+}));
+
 // Billing (Stripe webhook necesita body sin parsear — DEBE ir antes de express.json)
 app.use('/api/billing', require('./routes/billing'));
 

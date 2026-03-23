@@ -2,9 +2,19 @@ const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 const bcrypt = require('bcrypt');
+const rateLimit = require('express-rate-limit');
 const { User } = require('../models');
 const { authenticate } = require('../middleware/auth');
 const jwt = require('jsonwebtoken');
+
+// Protección: máximo 10 intentos de verificación de PIN por minuto por IP
+const pinLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 10,
+    message: { error: 'Demasiados intentos de verificación de PIN. Intenta de nuevo en un minuto.' },
+    standardHeaders: true,
+    legacyHeaders: false
+});
 
 // ── SSE: notificaciones en tiempo real de cambios en ajustes ──────────────────
 const _settingsClients = new Map(); // businessId (string) → Set<Response>
@@ -113,7 +123,7 @@ router.put('/', authenticate, async (req, res) => {
 
 // POST /api/settings/verify-pin — Verificar PIN de perfil (permisos_roles) con bcrypt
 // Soporta SHA256 legacy (desktop) y migra automáticamente a bcrypt al verificar.
-router.post('/verify-pin', authenticate, async (req, res) => {
+router.post('/verify-pin', pinLimiter, authenticate, async (req, res) => {
     try {
         const { role, pin } = req.body;
         if (!role || !pin) {
@@ -186,7 +196,7 @@ router.post('/verify-pin', authenticate, async (req, res) => {
 });
 
 // POST /api/settings/hash-pin — Generar hash bcrypt de un PIN (para crear/actualizar PINs)
-router.post('/hash-pin', authenticate, async (req, res) => {
+router.post('/hash-pin', pinLimiter, authenticate, async (req, res) => {
     try {
         const { pin } = req.body;
         if (!pin || !/^\d{4,8}$/.test(pin)) {

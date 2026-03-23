@@ -4,12 +4,22 @@ const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
 const { User } = require('../models');
 const { authenticate, isOwner } = require('../middleware/auth');
+const { Op } = require('sequelize');
 
 // Protección: máximo 10 intentos de login cada 15 minutos por IP
 const loginLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 10,
     message: { error: 'Demasiados intentos de inicio de sesión. Intenta de nuevo en 15 minutos.' },
+    standardHeaders: true,
+    legacyHeaders: false
+});
+
+// Protección: máximo 10 intentos de verificación de PIN por minuto por IP
+const pinLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 10,
+    message: { error: 'Demasiados intentos de verificación de PIN. Intenta de nuevo en un minuto.' },
     standardHeaders: true,
     legacyHeaders: false
 });
@@ -45,10 +55,10 @@ router.post('/', authenticate, isOwner, async (req, res) => {
             return res.status(400).json({ error: 'El rol debe ser cashier, waiter o delivery' });
         }
 
-        // Verificar que el username no esté en uso
-        const existe = await User.findOne({ where: { username } });
+        // Verificar que el username no esté en uso dentro del mismo negocio
+        const existe = await User.findOne({ where: { username, business_id: req.user.id } });
         if (existe) {
-            return res.status(409).json({ error: 'Ya existe un usuario con ese nombre de usuario' });
+            return res.status(409).json({ error: 'Ya existe un empleado con ese nombre de usuario en tu negocio' });
         }
 
         const empleado = await User.create({
@@ -145,7 +155,7 @@ router.delete('/:id', authenticate, isOwner, async (req, res) => {
 
 // POST /api/staff/verify-pin — Verificar PIN de un empleado sin crear token nuevo
 // Recibe { employee_id, pin }. Requiere sesión activa. Útil para autorizar acciones sensibles.
-router.post('/verify-pin', authenticate, async (req, res) => {
+router.post('/verify-pin', pinLimiter, authenticate, async (req, res) => {
     try {
         const { employee_id, pin } = req.body;
         const biz = req.user.business_id;
@@ -178,16 +188,40 @@ router.post('/verify-pin', authenticate, async (req, res) => {
 });
 
 // POST /api/staff/login — Login de empleado (genera token con business_id del dueño)
+// Acepta { username, password, business_email? }
+// business_email es el email del dueño — requerido si hay varios empleados con el mismo username
 router.post('/login', loginLimiter, async (req, res) => {
     try {
-        const { username, password } = req.body;
+        const { username, password, business_email } = req.body;
         if (!username || !password) {
             return res.status(400).json({ error: 'Usuario y contraseña son requeridos' });
         }
 
-        const empleado = await User.findOne({
-            where: { username, active: true }
-        });
+        let empleado;
+
+        if (business_email) {
+            // Buscar al dueño por su email (guardado como username del owner)
+            const owner = await User.findOne({ where: { username: business_email, role: 'owner' } });
+            if (!owner) {
+                return res.status(401).json({ error: 'Credenciales incorrectas' });
+            }
+            empleado = await User.findOne({
+                where: { username, business_id: owner.id, active: true }
+            });
+        } else {
+            // Sin business_email: funciona si el username es único
+            const matches = await User.findAll({
+                where: { username, active: true, business_id: { [Op.ne]: null } }
+            });
+            if (matches.length === 1) {
+                empleado = matches[0];
+            } else if (matches.length > 1) {
+                return res.status(400).json({
+                    error: 'Hay varios empleados con ese usuario. Incluye el email del dueño (business_email) para identificar el negocio.',
+                    require_business_email: true
+                });
+            }
+        }
 
         if (!empleado || !empleado.business_id) {
             return res.status(401).json({ error: 'Credenciales incorrectas' });
@@ -203,7 +237,7 @@ router.post('/login', loginLimiter, async (req, res) => {
                 id: empleado.id,
                 username: empleado.username,
                 role: empleado.role,
-                business_id: empleado.business_id  // Ver datos del negocio del dueño
+                business_id: empleado.business_id
             },
             process.env.JWT_SECRET,
             { expiresIn: '30d' }
