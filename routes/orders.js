@@ -283,6 +283,17 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
             return res.status(400).json({ error: 'El pedido debe tener al menos un producto' });
         }
 
+        if (items && items.length > 500) {
+            await t.rollback();
+            return res.status(400).json({ error: 'Un pedido no puede tener más de 500 productos' });
+        }
+
+        // Validar longitud de notas
+        if (notes && typeof notes === 'string' && notes.length > 1000) {
+            await t.rollback();
+            return res.status(400).json({ error: 'Las notas no pueden tener más de 1000 caracteres' });
+        }
+
         // Si viene table_id, verificar que la mesa no tenga ya un pedido abierto
         if (table_id) {
             const mesaOcupada = await Order.findOne({
@@ -473,6 +484,11 @@ router.post('/:id/items', authenticate, async (req, res) => {
         if (!items || items.length === 0) {
             await t.rollback();
             return res.status(400).json({ error: 'Se requiere al menos un producto' });
+        }
+
+        if (items.length > 500) {
+            await t.rollback();
+            return res.status(400).json({ error: 'No se pueden agregar más de 500 productos a la vez' });
         }
 
         const order = await Order.findOne({

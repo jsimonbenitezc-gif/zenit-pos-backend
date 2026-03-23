@@ -148,6 +148,18 @@ router.post('/', createCustomerLimiter, authenticate, async (req, res) => {
         if (!phone || !name) {
             return res.status(400).json({ error: 'Teléfono y nombre son requeridos' });
         }
+
+        // Validar longitudes
+        if (name.length > 200) return res.status(400).json({ error: 'El nombre no puede tener más de 200 caracteres' });
+        if (address && address.length > 500) return res.status(400).json({ error: 'La dirección no puede tener más de 500 caracteres' });
+        if (notes && notes.length > 1000) return res.status(400).json({ error: 'Las notas no pueden tener más de 1000 caracteres' });
+
+        // Validar formato de teléfono
+        const phoneRegex = /^[0-9\s\-\+\(\)]{7,20}$/;
+        if (!phoneRegex.test(phone.trim())) {
+            return res.status(400).json({ error: 'Formato de teléfono inválido' });
+        }
+
         // Verificar si ya existe en este negocio
         const exists = await Customer.findOne({ where: { phone, business_id: biz } });
         if (exists) {
@@ -183,6 +195,19 @@ router.put('/:id', authenticate, async (req, res) => {
         }
 
         const { phone, name, address, notes, employee_id, pin, employee_name } = req.body;
+
+        // Validar longitudes
+        if (name && name.length > 200) return res.status(400).json({ error: 'El nombre no puede tener más de 200 caracteres' });
+        if (address && address.length > 500) return res.status(400).json({ error: 'La dirección no puede tener más de 500 caracteres' });
+        if (notes && notes.length > 1000) return res.status(400).json({ error: 'Las notas no pueden tener más de 1000 caracteres' });
+
+        // Validar formato de teléfono
+        if (phone) {
+            const phoneRegex = /^[0-9\s\-\+\(\)]{7,20}$/;
+            if (!phoneRegex.test(phone.trim())) {
+                return res.status(400).json({ error: 'Formato de teléfono inválido' });
+            }
+        }
 
         // Registrar en auditoría (PIN verificado en el frontend)
         let authorizedEmployee = null;

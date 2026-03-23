@@ -89,6 +89,11 @@ router.post('/', authenticate, async (req, res) => {
     try {
         const { cajero_nombre, rol, fondo_inicial, branch_id } = req.body;
 
+        if (parseFloat(fondo_inicial) < 0) {
+            await t.rollback();
+            return res.status(400).json({ error: 'El fondo inicial no puede ser negativo' });
+        }
+
         // Solo puede haber un turno abierto por sucursal.
         // El FOR UPDATE bloquea la fila si existe; el índice parcial único en BD
         // rechaza la creación si dos requests llegan al mismo tiempo.

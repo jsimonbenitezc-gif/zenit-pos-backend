@@ -130,6 +130,11 @@ router.post('/', createProductLimiter, authenticate, isOwner, async (req, res) =
         if (!name || !price) {
             return res.status(400).json({ error: 'Nombre y precio son requeridos' });
         }
+
+        // Validar longitudes
+        if (name.length > 200) return res.status(400).json({ error: 'El nombre no puede tener más de 200 caracteres' });
+        if (description && description.length > 2000) return res.status(400).json({ error: 'La descripción no puede tener más de 2000 caracteres' });
+
         const product = await Product.create({
             name,
             description,
@@ -157,6 +162,11 @@ router.put('/:id', authenticate, isOwner, async (req, res) => {
             return res.status(404).json({ error: 'Producto no encontrado' });
         }
         const { name, description, price, stock, category_id, emoji, image, active } = req.body;
+
+        // Validar longitudes
+        if (name && name.length > 200) return res.status(400).json({ error: 'El nombre no puede tener más de 200 caracteres' });
+        if (description && description.length > 2000) return res.status(400).json({ error: 'La descripción no puede tener más de 2000 caracteres' });
+
         await product.update({
             name: name !== undefined ? name : product.name,
             description: description !== undefined ? description : product.description,
