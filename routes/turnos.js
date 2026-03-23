@@ -19,8 +19,9 @@ function _notificarTurno(businessId) {
 }
 
 // GET /api/turnos/events — SSE para actualizaciones de turno en tiempo real
+// Auth via Authorization header (preferred) or query param ?token=JWT (fallback for desktop)
 router.get('/events', (req, res) => {
-    const token = req.query.token;
+    const token = (req.headers.authorization?.startsWith('Bearer ') && req.headers.authorization.slice(7)) || req.query.token;
     if (!token) return res.status(401).end();
     let businessId;
     try {

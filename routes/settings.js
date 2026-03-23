@@ -19,9 +19,9 @@ function _notificarSettings(businessId) {
 }
 
 // GET /api/settings/events - SSE para actualizaciones de ajustes
-// Auth via query param ?token=JWT (EventSource no soporta headers)
+// Auth via Authorization header (preferred) or query param ?token=JWT (fallback for desktop)
 router.get('/events', (req, res) => {
-    const token = req.query.token;
+    const token = (req.headers.authorization?.startsWith('Bearer ') && req.headers.authorization.slice(7)) || req.query.token;
     if (!token) return res.status(401).end();
     let businessId;
     try {
