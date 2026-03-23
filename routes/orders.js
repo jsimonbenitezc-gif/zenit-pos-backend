@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { Order, OrderItem, Product, Customer, Table, ProductRecipe, Ingredient, PreparationItem, PrivilegedActionLog, User, sequelize } = require('../models');
+const { Order, OrderItem, Product, Customer, Table, ProductRecipe, Ingredient, PreparationItem, PrivilegedActionLog, User, Discount, sequelize } = require('../models');
 const { authenticate } = require('../middleware/auth');
 const { verifyEmployeePin } = require('../utils/verifyPin');
 const { Op } = require('sequelize');
@@ -272,7 +272,8 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
             customer_id, customer_temp_info, items, total,
             payment_method, order_type, reference,
             delivery_address, maps_link, notes, branch_id,
-            table_id, guests, discount_amount,
+            table_id, guests, discount_amount, discount_id,
+            employee_id: disc_employee_id, pin: disc_pin,
             loyalty_points_used, loyalty_points_earned,
         } = req.body;
 
@@ -291,6 +292,30 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
             if (mesaOcupada) {
                 await t.rollback();
                 return res.status(409).json({ error: 'La mesa ya tiene un pedido abierto' });
+            }
+        }
+
+        // Si viene discount_id, verificar que el descuento existe y si requiere PIN
+        if (discount_id) {
+            const discount = await Discount.findOne({
+                where: { id: discount_id, business_id: biz },
+                transaction: t
+            });
+            if (!discount) {
+                await t.rollback();
+                return res.status(404).json({ error: 'Descuento no encontrado' });
+            }
+            if (discount.requires_pin) {
+                if (!disc_employee_id || !disc_pin) {
+                    await t.rollback();
+                    return res.status(403).json({ error: 'Este descuento requiere autorización con PIN' });
+                }
+                try {
+                    await verifyEmployeePin(disc_employee_id, disc_pin, biz);
+                } catch (pinErr) {
+                    await t.rollback();
+                    return res.status(403).json({ error: pinErr.message });
+                }
             }
         }
 
