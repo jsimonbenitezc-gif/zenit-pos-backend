@@ -1,8 +1,9 @@
 const express = require('express');
 const router = express.Router();
+const logger = require('../utils/logger');
 const { Op } = require('sequelize');
 const { authenticate } = require('../middleware/auth');
-const { User } = require('../models');
+const { User, ProcessedWebhook } = require('../models');
 
 // Inicialización segura de Stripe — no crashea el servidor si falta la key
 let stripe = null;
@@ -10,7 +11,7 @@ if (process.env.STRIPE_SECRET_KEY) {
     stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
     console.log('✅ Stripe SDK inicializado');
 } else {
-    console.error('❌ STRIPE_SECRET_KEY no configurada — funciones de pago desactivadas');
+    logger.error('❌ STRIPE_SECRET_KEY no configurada — funciones de pago desactivadas');
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -91,13 +92,11 @@ function resolveSubscriptionExpiry(sub, fallbackDate) {
 // Verifica que las variables de Stripe estén configuradas (solo para diagnóstico)
 router.get('/config-check', authenticate, (req, res) => {
     res.json({
-        stripe_key_set:    !!process.env.STRIPE_SECRET_KEY,
-        price_id_set:      !!process.env.STRIPE_PRICE_ID,
-        webhook_set:       !!process.env.STRIPE_WEBHOOK_SECRET,
-        app_url_set:       !!process.env.APP_URL,
-        stripe_ready:      !!stripe,
-        price_id_value:    process.env.STRIPE_PRICE_ID || '(no configurado)',
-        app_url_value:     process.env.APP_URL || '(no configurado)',
+        stripe_key_configured:    !!process.env.STRIPE_SECRET_KEY,
+        price_id_configured:      !!process.env.STRIPE_PRICE_ID,
+        webhook_configured:       !!process.env.STRIPE_WEBHOOK_SECRET,
+        app_url_configured:       !!process.env.APP_URL,
+        stripe_ready:             !!stripe,
     });
 });
 
@@ -169,13 +168,13 @@ router.get('/sync', authenticate, async (req, res) => {
                 }
             } catch (stripeErr) {
                 // Si Stripe falla, devolvemos el plan actual de la BD sin error
-                console.error('billing/sync Stripe error:', stripeErr.message);
+                logger.error('billing/sync Stripe error:', stripeErr.message);
             }
         }
 
         res.json(planInfo(user));
     } catch (err) {
-        console.error('billing/sync error:', err.message);
+        logger.error('billing/sync error:', err.message);
         res.status(500).json({ error: 'Error interno' });
     }
 });
@@ -243,7 +242,7 @@ router.post('/create-checkout', authenticate, async (req, res) => {
 
         res.json({ url: session.url });
     } catch (err) {
-        console.error('Stripe checkout error:', err.message);
+        logger.error('Stripe checkout error:', err.message);
         res.status(500).json({ error: 'No se pudo iniciar el proceso de pago' });
     }
 });
@@ -264,7 +263,7 @@ router.post('/portal', authenticate, async (req, res) => {
 
         res.json({ url: session.url });
     } catch (err) {
-        console.error('Stripe portal error:', err.message);
+        logger.error('Stripe portal error:', err.message);
         res.status(500).json({ error: 'No se pudo abrir el portal de facturación' });
     }
 });
@@ -272,14 +271,28 @@ router.post('/portal', authenticate, async (req, res) => {
 // ─── POST /api/billing/webhook ───────────────────────────────────────────────
 // Recibe eventos de Stripe (DEBE ir ANTES del express.json() global — usa raw body)
 router.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+    if (!stripe) return res.status(503).json({ error: 'Stripe no configurado' });
+
     const sig = req.headers['stripe-signature'];
     let event;
 
     try {
         event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
     } catch (err) {
-        console.error('Webhook signature error:', err.message);
+        logger.error('Webhook signature error:', err.message);
         return res.status(400).json({ error: `Webhook error: ${err.message}` });
+    }
+
+    // Idempotencia: no reprocesar eventos ya manejados
+    try {
+        const [, creado] = await ProcessedWebhook.findOrCreate({ where: { event_id: event.id } });
+        if (!creado) {
+            // El evento ya fue procesado antes — responder OK sin reprocesar
+            return res.json({ received: true });
+        }
+    } catch (idempErr) {
+        // Si la tabla no existe aún o hay error, continuar sin bloquear el webhook
+        logger.error('Error verificando idempotencia de webhook:', idempErr.message);
     }
 
     try {
@@ -383,7 +396,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
 
         res.json({ received: true });
     } catch (err) {
-        console.error('Webhook handler error:', err);
+        logger.error('Webhook handler error:', err);
         res.status(500).json({ error: 'Error procesando webhook' });
     }
 });

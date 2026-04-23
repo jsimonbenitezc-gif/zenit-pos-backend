@@ -23,6 +23,9 @@ const ComboItem = require('./ComboItem');
 // Sucursales
 const Branch = require('./Branch');
 
+// Stock por sucursal (tabla relacional)
+const BranchStock = require('./BranchStock');
+
 // Mesas
 const Table = require('./Table');
 
@@ -31,6 +34,9 @@ const Turno = require('./Turno');
 
 // Auditoría de acciones privilegiadas
 const PrivilegedActionLog = require('./PrivilegedActionLog');
+
+// Idempotencia de webhooks Stripe
+const ProcessedWebhook = require('./ProcessedWebhook');
 
 // Objeto con todos los modelos
 const models = {
@@ -49,9 +55,11 @@ const models = {
     Combo,
     ComboItem,
     Branch,
+    BranchStock,
     Table,
     Turno,
     PrivilegedActionLog,
+    ProcessedWebhook,
 };
 
 // Definir relaciones
@@ -114,186 +122,21 @@ const setupRelations = () => {
 
     // PrivilegedActionLog <-> Branch
     models.PrivilegedActionLog.belongsTo(models.Branch, { foreignKey: 'branch_id', as: 'branch' });
+
+    // Order -> User (quién creó el pedido)
+    models.Order.belongsTo(models.User, { foreignKey: 'created_by', as: 'creator' });
+
+    // BranchStock <-> Ingredient, Branch
+    models.Ingredient.hasMany(models.BranchStock, { foreignKey: 'ingredient_id', as: 'branchStocks' });
+    models.BranchStock.belongsTo(models.Ingredient, { foreignKey: 'ingredient_id', as: 'ingredient' });
+    models.Branch.hasMany(models.BranchStock, { foreignKey: 'branch_id', as: 'branchStocks' });
+    models.BranchStock.belongsTo(models.Branch, { foreignKey: 'branch_id', as: 'branch' });
 };
 
-const { DataTypes } = require('sequelize');
-
-// Agrega columnas nuevas de forma segura (si ya existen, no hace nada)
+// Las migraciones ahora se ejecutan via sequelize-cli.
+// Ver carpeta /migrations/ para el historial de cambios.
 const runMigrations = async () => {
-    const sqlMigrations = [
-        `ALTER TABLE categories  ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE`,
-        `ALTER TABLE customers   ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE`,
-        `ALTER TABLE discounts   ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE`,
-        `ALTER TABLE combos      ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE`,
-        `UPDATE categories SET active = TRUE WHERE active IS NULL`,
-        `UPDATE customers  SET active = TRUE WHERE active IS NULL`,
-        `UPDATE discounts  SET active = TRUE WHERE active IS NULL`,
-        `UPDATE combos     SET active = TRUE WHERE active IS NULL`,
-        `ALTER TABLE users ADD COLUMN IF NOT EXISTS business_id INTEGER REFERENCES users(id)`,
-        // Asegurar que el valor 'premium' existe en el ENUM aunque fue creado antes de añadirlo
-        `ALTER TYPE enum_users_plan ADD VALUE IF NOT EXISTS 'premium'`,
-    ];
-
-    for (const sql of sqlMigrations) {
-        try {
-            await sequelize.query(sql);
-        } catch (err) {
-            if (!err.message.includes('already exists')) {
-                console.error('❌ Migration error:', err.message);
-            }
-        }
-    }
-
-    // Columnas de sucursal: usar QueryInterface para que Sequelize maneje el nombre de tabla correctamente
-    const qi = sequelize.getQueryInterface();
-    const safeAdd = async (table, column, definition) => {
-        try {
-            await qi.addColumn(table, column, definition);
-            console.log(`✅ Added column ${table}.${column}`);
-        } catch (err) {
-            if (!err.message.includes('already exists')) {
-                console.error(`❌ Migration ${table}.${column}:`, err.message);
-            }
-        }
-    };
-    await safeAdd('orders',    'branch_id',           { type: DataTypes.INTEGER, allowNull: true });
-    await safeAdd('orders',    'table_id',            { type: DataTypes.INTEGER, allowNull: true });
-    await safeAdd('orders',    'guests',              { type: DataTypes.INTEGER, allowNull: true });
-    await safeAdd('orders',    'discount_amount',     { type: DataTypes.DECIMAL(10,2), defaultValue: 0 });
-    await safeAdd('users',     'branch_id',           { type: DataTypes.INTEGER, allowNull: true });
-    await safeAdd('customers', 'loyalty_points',      { type: DataTypes.INTEGER, defaultValue: 0 });
-    await safeAdd('customers', 'in_loyalty',          { type: DataTypes.BOOLEAN, defaultValue: false });
-    await safeAdd('preparation_items', 'unit_recipe', { type: DataTypes.STRING,  allowNull: true });
-    await safeAdd('product_recipes',   'unit_recipe', { type: DataTypes.STRING,  allowNull: true });
-    // Turnos
-    await safeAdd('turnos', 'branch_id',           { type: DataTypes.INTEGER,       allowNull: true });
-    await safeAdd('turnos', 'rol',                 { type: DataTypes.STRING,        allowNull: true });
-    await safeAdd('turnos', 'notas',               { type: DataTypes.TEXT,          allowNull: true });
-    await safeAdd('turnos', 'total_tarjeta',       { type: DataTypes.DECIMAL(10,2), defaultValue: 0 });
-    await safeAdd('turnos', 'total_transferencia', { type: DataTypes.DECIMAL(10,2), defaultValue: 0 });
-    // Stock por sucursal
-    await safeAdd('ingredients',          'branch_stocks', { type: DataTypes.TEXT, allowNull: true });
-    await safeAdd('inventory_movements',  'branch_id',     { type: DataTypes.INTEGER, allowNull: true });
-
-    // Migrar stock global → branch_stocks para la sucursal principal de cada negocio
-    // Solo afecta ingredientes donde branch_stocks es NULL (primera vez)
-    try {
-        await sequelize.query(`
-            UPDATE ingredients
-            SET branch_stocks = (
-                SELECT json_build_object(b.id::text, COALESCE(ingredients.stock::numeric, 0))::text
-                FROM "Branches" b
-                WHERE b.business_id = ingredients.business_id
-                  AND b.active = true
-                ORDER BY b.id ASC
-                LIMIT 1
-            )
-            WHERE ingredients.branch_stocks IS NULL
-              AND EXISTS (
-                SELECT 1 FROM "Branches" b2
-                WHERE b2.business_id = ingredients.business_id AND b2.active = true
-              )
-        `);
-        console.log('✅ Stock global migrado a branch_stocks (sucursal principal)');
-    } catch (err) {
-        console.error('❌ Error migrando branch_stocks:', err.message);
-    }
-    // Teléfono y dirección por sucursal (tabla con B mayúscula)
-    await safeAdd('Branches', 'phone',   { type: DataTypes.STRING, allowNull: true });
-    await safeAdd('Branches', 'address', { type: DataTypes.STRING, allowNull: true });
-    // Suscripción
-    await safeAdd('users',     'plan_expires_at',     { type: DataTypes.DATE,    allowNull: true });
-    await safeAdd('users',     'stripe_customer_id',  { type: DataTypes.STRING,  allowNull: true });
-    await safeAdd('users',     'stripe_subscription_id', { type: DataTypes.STRING, allowNull: true });
-    // Auditoría: requiere PIN por descuento
-    await safeAdd('discounts', 'requires_pin', { type: DataTypes.BOOLEAN, defaultValue: false, allowNull: false });
-    // Push notifications
-    await safeAdd('users', 'push_tokens', { type: DataTypes.TEXT, allowNull: true });
-    // plan ENUM — se maneja con SQL directo para compatibilidad con PostgreSQL
-    try {
-        await sequelize.query(`DO $$ BEGIN
-            CREATE TYPE enum_users_plan AS ENUM ('free', 'trial', 'premium');
-        EXCEPTION WHEN duplicate_object THEN NULL; END $$`);
-        await sequelize.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS plan enum_users_plan DEFAULT 'free'`);
-        console.log('✅ Added column users.plan');
-    } catch (err) {
-        if (!err.message.includes('already exists')) console.error('❌ Migration users.plan:', err.message);
-    }
-
-    // Limpiar categorías duplicadas (creadas por clonación accidental de sucursales)
-    // Conserva solo la de menor ID por cada combinación business_id + nombre
-    try {
-        await sequelize.query(`
-            DELETE FROM categories
-            WHERE id NOT IN (
-                SELECT MIN(id) FROM categories GROUP BY business_id, name
-            )
-        `);
-        console.log('✅ Categorías duplicadas limpiadas');
-    } catch (err) {
-        console.error('❌ Error limpiando categorías duplicadas:', err.message);
-    }
-
-    // Asignar pedidos históricos (branch_id=NULL) a la sucursal activa del negocio
-    // Estos son pedidos creados antes de que existiera el sistema de sucursales
-    try {
-        await sequelize.query(`
-            UPDATE orders
-            SET branch_id = (
-                SELECT MIN(id) FROM "Branches"
-                WHERE "Branches".business_id = orders.business_id
-                AND "Branches".active = true
-            )
-            WHERE branch_id IS NULL
-        `);
-        console.log('✅ Pedidos históricos asignados a sucursal activa');
-    } catch (err) {
-        console.error('❌ Error asignando pedidos históricos:', err.message);
-    }
-
-    // Backfill business_id en movimientos de inventario que tengan NULL
-    // (creados antes de que la columna fuera obligatoria)
-    try {
-        await sequelize.query(`
-            UPDATE inventory_movements im
-            SET business_id = (
-                SELECT i.business_id FROM ingredients i WHERE i.id = im.ingredient_id
-            )
-            WHERE im.business_id IS NULL
-        `);
-        console.log('✅ inventory_movements.business_id backfill completado');
-    } catch (err) {
-        console.error('❌ Error en backfill de inventory_movements.business_id:', err.message);
-    }
-
-    // ── Índice parcial único: solo un turno abierto por (business_id, branch_id) ─
-    // COALESCE convierte branch_id NULL en 0 para que NULL=NULL sí colisione
-    try {
-        await sequelize.query(`
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_turnos_one_open
-            ON turnos (business_id, COALESCE(branch_id, 0))
-            WHERE estado = 'abierto'
-        `);
-    } catch (err) {
-        if (!err.message.includes('already exists')) console.error('❌ Migration idx_turnos_one_open:', err.message);
-    }
-
-    // ── Índices de rendimiento ───────────────────────────────────────────────────
-    const indexes = [
-        `CREATE INDEX IF NOT EXISTS idx_orders_biz_status     ON orders    (business_id, status)`,
-        `CREATE INDEX IF NOT EXISTS idx_orders_biz_createdat  ON orders    (business_id, "createdAt" DESC)`,
-        `CREATE INDEX IF NOT EXISTS idx_customers_biz         ON customers (business_id)`,
-        `CREATE INDEX IF NOT EXISTS idx_ingredients_biz       ON ingredients (business_id)`,
-    ];
-    for (const sql of indexes) {
-        try {
-            await sequelize.query(sql);
-        } catch (err) {
-            if (!err.message.includes('already exists')) console.error('❌ Migration index:', err.message);
-        }
-    }
-
-    console.log('✅ Migrations applied');
+    console.log('✅ Migrations managed by sequelize-cli');
 };
 
 // Sincronizar base de datos
