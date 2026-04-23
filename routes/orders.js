@@ -119,6 +119,67 @@ async function descontarIngredientesDeReceta(productId, qty, t, branchId = null)
     }
 }
 
+// Agrega recursivamente los requerimientos de ingredientes de un producto al mapa acumulador
+async function acumularRequerimientosDeProducto(productId, qty, requerimientos, t) {
+    const recetaItems = await ProductRecipe.findAll({ where: { product_id: productId }, transaction: t });
+    if (!recetaItems.length) return;
+
+    for (const item of recetaItems) {
+        if (item.item_type === 'ingredient') {
+            const ingrediente = await Ingredient.findByPk(item.item_id, { transaction: t });
+            if (!ingrediente) continue;
+            const cantReq = convertirUnidad(parseFloat(item.quantity), item.unit_recipe, ingrediente) * qty;
+            const existente = requerimientos.get(ingrediente.id);
+            if (existente) {
+                existente.required += cantReq;
+            } else {
+                requerimientos.set(ingrediente.id, { ingredient: ingrediente, required: cantReq });
+            }
+        } else if (item.item_type === 'preparation') {
+            const prepItems = await PreparationItem.findAll({
+                where: { preparation_id: item.item_id },
+                include: [{ model: Ingredient, as: 'ingredient' }],
+                transaction: t
+            });
+            const cantPrep = parseFloat(item.quantity) * qty;
+            for (const pi of prepItems) {
+                if (!pi.ingredient) continue;
+                const cantReq = convertirUnidad(parseFloat(pi.quantity), pi.unit_recipe, pi.ingredient) * cantPrep;
+                const existente = requerimientos.get(pi.ingredient.id);
+                if (existente) {
+                    existente.required += cantReq;
+                } else {
+                    requerimientos.set(pi.ingredient.id, { ingredient: pi.ingredient, required: cantReq });
+                }
+            }
+        }
+    }
+}
+
+// Valida que haya stock suficiente para todos los items del pedido.
+// Retorna un array de warnings con los ingredientes insuficientes. Vacío = stock OK.
+async function validarStockIngredientes(resolvedItems, branchId, t) {
+    const requerimientos = new Map();
+    for (const { product, qty } of resolvedItems) {
+        await acumularRequerimientosDeProducto(product.id, qty, requerimientos, t);
+    }
+
+    const warnings = [];
+    for (const { ingredient, required } of requerimientos.values()) {
+        const available = await getBranchStock(ingredient, branchId, t);
+        if (available < required) {
+            warnings.push({
+                ingredient_id: ingredient.id,
+                ingredient: ingredient.name,
+                unit: ingredient.unit,
+                available: parseFloat(available.toFixed(4)),
+                required: parseFloat(required.toFixed(4))
+            });
+        }
+    }
+    return warnings;
+}
+
 async function restaurarIngredientesDeReceta(productId, qty, t, branchId = null) {
     const recetaItems = await ProductRecipe.findAll({ where: { product_id: productId }, transaction: t });
     if (!recetaItems.length) return;
@@ -278,6 +339,7 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
             table_id, guests, discount_amount, discount_id,
             employee_id: disc_employee_id, pin: disc_pin,
             loyalty_points_used, loyalty_points_earned,
+            skip_stock_check,
         } = req.body;
 
         // Permitir pedido vacío cuando viene con table_id (mesa reservada, los items se agregan después)
@@ -363,6 +425,17 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
         }
 
         calculatedTotal = parseFloat(calculatedTotal.toFixed(2));
+
+        // Validar stock de ingredientes antes de crear el pedido.
+        // Si falta stock y el cliente no ha confirmado con skip_stock_check, devolver warnings
+        // para que el frontend muestre el modal "¿continuar?" al usuario.
+        if (!skip_stock_check) {
+            const warnings = await validarStockIngredientes(resolvedItems, branch_id || null, t);
+            if (warnings.length > 0) {
+                await t.rollback();
+                return res.status(200).json({ stock_warning: true, warnings });
+            }
+        }
 
         const discountAmt = parseFloat(Math.min(Math.max(parseFloat(discount_amount) || 0, 0), calculatedTotal).toFixed(2));
         const finalTotal = parseFloat((calculatedTotal - discountAmt).toFixed(2));
