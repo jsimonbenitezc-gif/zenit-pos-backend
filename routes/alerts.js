@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
-const { Ingredient, Branch, Order, sequelize } = require('../models');
+const logger = require('../utils/logger');
+const { Ingredient, Branch, BranchStock, Order, sequelize } = require('../models');
 const { authenticate } = require('../middleware/auth');
 const { Op } = require('sequelize');
 
@@ -29,11 +30,23 @@ router.get('/', authenticate, async (req, res) => {
         const branchMap = {};
         branches.forEach(b => { branchMap[String(b.id)] = b.name; });
 
+        // Precargar stocks de tabla BranchStock
+        const ingIds = ingredients.map(i => i.id);
+        const tableStocks = ingIds.length > 0
+            ? await BranchStock.findAll({ where: { ingredient_id: { [Op.in]: ingIds } } })
+            : [];
+        const tableMap = {}; // ingredientId -> { branchId: qty }
+        for (const r of tableStocks) {
+            if (!tableMap[r.ingredient_id]) tableMap[r.ingredient_id] = {};
+            tableMap[r.ingredient_id][String(r.branch_id)] = parseFloat(r.quantity);
+        }
+
         ingredients.forEach(ing => {
-            if (!ing.min_stock || ing.min_stock <= 0) return; // Sin mínimo definido: ignorar
-            const bs = ing.branch_stocks || {};
-            if (Object.keys(bs).length > 0) {
-                // Stock por sucursal
+            if (!ing.min_stock || ing.min_stock <= 0) return;
+            // Tabla primero, fallback JSON
+            const tableData = tableMap[ing.id];
+            const bs = tableData || (Object.keys(ing.branch_stocks || {}).length > 0 ? ing.branch_stocks : null);
+            if (bs && Object.keys(bs).length > 0) {
                 Object.entries(bs).forEach(([branchId, stock]) => {
                     const branchName = branchMap[branchId] || `Sucursal ${branchId}`;
                     const stockNum = parseFloat(stock) || 0;
@@ -44,7 +57,6 @@ router.get('/', authenticate, async (req, res) => {
                     }
                 });
             } else {
-                // Sin branch_stocks: usar stock global
                 const stockNum = parseFloat(ing.stock) || 0;
                 if (stockNum <= 0) {
                     alertas.push({ tipo: 'stock', nivel: 'peligro', icono: '🔴', mensaje: `Sin stock: "${ing.name}"` });
@@ -87,7 +99,7 @@ router.get('/', authenticate, async (req, res) => {
 
         res.json({ alertas });
     } catch (error) {
-        console.error('Alerts error:', error);
+        logger.error('Alerts error:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });

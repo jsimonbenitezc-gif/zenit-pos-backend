@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const logger = require('../utils/logger');
 const { Table, Order, OrderItem, Product } = require('../models');
 const { authenticate, isOwner } = require('../middleware/auth');
 const { Op } = require('sequelize');
@@ -49,7 +50,7 @@ router.get('/', authenticate, async (req, res) => {
 
         res.json(result);
     } catch (err) {
-        console.error('GET /tables error:', err);
+        logger.error('GET /tables error:', err);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
@@ -68,7 +69,7 @@ router.post('/', authenticate, isOwner, async (req, res) => {
         });
         res.status(201).json(table);
     } catch (err) {
-        console.error('POST /tables error:', err);
+        logger.error('POST /tables error:', err);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
@@ -89,7 +90,7 @@ router.put('/:id', authenticate, isOwner, async (req, res) => {
         });
         res.json(table);
     } catch (err) {
-        console.error('PUT /tables/:id error:', err);
+        logger.error('PUT /tables/:id error:', err);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
@@ -113,7 +114,7 @@ router.delete('/:id', authenticate, isOwner, async (req, res) => {
         await table.update({ active: false });
         res.json({ ok: true });
     } catch (err) {
-        console.error('DELETE /tables/:id error:', err);
+        logger.error('DELETE /tables/:id error:', err);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });

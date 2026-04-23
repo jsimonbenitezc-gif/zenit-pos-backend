@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const logger = require('../utils/logger');
 const { User } = require('../models');
 const { authenticate } = require('../middleware/auth');
 
@@ -28,7 +29,7 @@ router.post('/token', authenticate, async (req, res) => {
 
         res.json({ ok: true });
     } catch (error) {
-        console.error('Error registrando push token:', error);
+        logger.error('Error registrando push token:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
@@ -51,7 +52,7 @@ router.delete('/token', authenticate, async (req, res) => {
 
         res.json({ ok: true });
     } catch (error) {
-        console.error('Error eliminando push token:', error);
+        logger.error('Error eliminando push token:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });

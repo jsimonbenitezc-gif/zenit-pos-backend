@@ -1,10 +1,22 @@
 const express = require('express');
 const router = express.Router();
+const logger = require('../utils/logger');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const rateLimit = require('express-rate-limit');
 const { User } = require('../models');
 const { authenticate, isOwner } = require('../middleware/auth');
 const { Op } = require('sequelize');
+const { paginate, paginatedResponse } = require('../utils/pagination');
+
+// Genera un refresh token opaco y lo guarda hasheado en DB
+async function generateAndSaveRefreshToken(user) {
+    const refreshToken = crypto.randomBytes(64).toString('hex');
+    const refreshTokenHash = crypto.createHash('sha256').update(refreshToken).digest('hex');
+    const refreshTokenExpires = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+    await user.update({ refresh_token_hash: refreshTokenHash, refresh_token_expires: refreshTokenExpires });
+    return refreshToken;
+}
 
 // Protección: máximo 10 intentos de login cada 15 minutos por IP
 const loginLimiter = rateLimit({
@@ -27,13 +39,16 @@ const pinLimiter = rateLimit({
 // GET /api/staff — Listar todos los empleados del negocio
 router.get('/', authenticate, isOwner, async (req, res) => {
     try {
-        const staff = await User.findAll({
+        const { page, limit, offset } = paginate(req.query);
+        const { count, rows } = await User.findAndCountAll({
             where: { business_id: req.user.id },
-            attributes: ['id', 'name', 'username', 'role', 'active', 'createdAt']
+            attributes: ['id', 'name', 'username', 'role', 'active', 'createdAt'],
+            limit,
+            offset
         });
-        res.json(staff);
+        res.json(paginatedResponse(rows, count, page, limit));
     } catch (error) {
-        console.error('Error al obtener empleados:', error);
+        logger.error('Error al obtener empleados:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
@@ -46,8 +61,8 @@ router.post('/', authenticate, isOwner, async (req, res) => {
         if (!name || !username || !password) {
             return res.status(400).json({ error: 'Nombre, usuario y contraseña son requeridos' });
         }
-        if (password.length < 6) {
-            return res.status(400).json({ error: 'La contraseña debe tener al menos 6 caracteres' });
+        if (password.length < 8) {
+            return res.status(400).json({ error: 'La contraseña debe tener al menos 8 caracteres' });
         }
 
         const rolesValidos = ['cashier', 'waiter', 'delivery'];
@@ -78,11 +93,14 @@ router.post('/', authenticate, isOwner, async (req, res) => {
                 business_id: req.user.id  // business_id = el dueño, no el empleado
             },
             process.env.JWT_SECRET,
-            { expiresIn: '30d' }
+            { expiresIn: '15m' }
         );
+
+        const refreshToken = await generateAndSaveRefreshToken(empleado);
 
         res.status(201).json({
             token,
+            refreshToken,
             user: {
                 id: empleado.id,
                 name: empleado.name,
@@ -92,7 +110,7 @@ router.post('/', authenticate, isOwner, async (req, res) => {
             }
         });
     } catch (error) {
-        console.error('Error al crear empleado:', error);
+        logger.error('Error al crear empleado:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
@@ -131,7 +149,7 @@ router.put('/:id', authenticate, isOwner, async (req, res) => {
             active: empleado.active
         });
     } catch (error) {
-        console.error('Error al actualizar empleado:', error);
+        logger.error('Error al actualizar empleado:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
@@ -148,7 +166,7 @@ router.delete('/:id', authenticate, isOwner, async (req, res) => {
         await empleado.update({ active: false });
         res.json({ message: 'Empleado desactivado correctamente' });
     } catch (error) {
-        console.error('Error al eliminar empleado:', error);
+        logger.error('Error al eliminar empleado:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
@@ -182,7 +200,7 @@ router.post('/verify-pin', pinLimiter, authenticate, async (req, res) => {
             employee_name: valid ? employee.name : undefined
         });
     } catch (error) {
-        console.error('Error en verify-pin:', error);
+        logger.error('Error en verify-pin:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
@@ -240,11 +258,14 @@ router.post('/login', loginLimiter, async (req, res) => {
                 business_id: empleado.business_id
             },
             process.env.JWT_SECRET,
-            { expiresIn: '30d' }
+            { expiresIn: '15m' }
         );
+
+        const refreshToken = await generateAndSaveRefreshToken(empleado);
 
         res.json({
             token,
+            refreshToken,
             user: {
                 id: empleado.id,
                 name: empleado.name,
@@ -254,7 +275,7 @@ router.post('/login', loginLimiter, async (req, res) => {
             }
         });
     } catch (error) {
-        console.error('Error en login de empleado:', error);
+        logger.error('Error en login de empleado:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });

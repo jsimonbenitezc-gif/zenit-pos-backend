@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const logger = require('../utils/logger');
 const {
     Ingredient,
     Preparation,
@@ -8,6 +9,7 @@ const {
     ProductRecipe,
     InventoryMovement,
     PrivilegedActionLog,
+    BranchStock,
     User,
     sequelize
 } = require('../models');
@@ -17,6 +19,26 @@ const { requirePremium } = require('../middleware/checkPlan');
 const jwt = require('jsonwebtoken');
 const { notificarAudit } = require('./audit');
 const { enviarNotificacion } = require('../utils/push');
+const { paginate, paginatedResponse } = require('../utils/pagination');
+
+// ── Helper: lectura dual BranchStock (tabla primero, fallback JSON) ──────────
+async function getBranchStockFromTable(ingredientId, branchId) {
+    if (!branchId) return null;
+    const record = await BranchStock.findOne({
+        where: { ingredient_id: ingredientId, branch_id: parseInt(branchId) }
+    });
+    return record ? parseFloat(record.quantity) : null;
+}
+
+async function getAllBranchStocksFromTable(ingredientId) {
+    const records = await BranchStock.findAll({
+        where: { ingredient_id: ingredientId }
+    });
+    if (records.length === 0) return null;
+    const map = {};
+    for (const r of records) map[String(r.branch_id)] = parseFloat(r.quantity);
+    return map;
+}
 
 const UNIT_CONVERSION = {
     'kg_g': 1000,
@@ -122,8 +144,22 @@ router.get('/products-stock', authenticate, async (req, res) => {
             }
         }
 
+        // Precargar stocks de tabla BranchStock para todos los ingredientes de una vez
+        const allIngIds = [...new Set([...ingIds, ...(Object.values(prepItemsMap).flat().map(pi => pi.ingredient_id))])];
+        const tableStockMap = {};
+        if (branchId && allIngIds.length > 0) {
+            const { Op: Op2 } = require('sequelize');
+            const bsRecords = await BranchStock.findAll({
+                where: { ingredient_id: { [Op2.in]: allIngIds }, branch_id: parseInt(branchId) }
+            });
+            for (const r of bsRecords) tableStockMap[r.ingredient_id] = parseFloat(r.quantity);
+        }
+
         function getStock(ing) {
             if (!branchId) return parseFloat(ing.stock) || 0;
+            // Tabla primero
+            if (ing.id in tableStockMap) return tableStockMap[ing.id];
+            // Fallback JSON
             const bs = ing.branch_stocks || {};
             return Object.keys(bs).length > 0
                 ? parseFloat(bs[branchId] ?? 0)
@@ -161,7 +197,7 @@ router.get('/products-stock', authenticate, async (req, res) => {
 
         res.json(result);
     } catch (error) {
-        console.error('products-stock error:', error);
+        logger.error('products-stock error:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
@@ -177,40 +213,71 @@ router.get('/ingredients', authenticate, async (req, res) => {
     try {
         const biz = req.user.business_id;
         const branchId = req.query.branch_id ? String(req.query.branch_id) : null;
-        const ingredients = await Ingredient.findAll({
+        const { page, limit, offset } = paginate(req.query);
+
+        const { count, rows: ingredients } = await Ingredient.findAndCountAll({
             where: { active: true, business_id: biz },
-            order: [['name', 'ASC']]
+            order: [['name', 'ASC']],
+            limit,
+            offset
         });
         if (branchId) {
+            // Precargar de tabla BranchStock
+            const ingIds = ingredients.map(i => i.id);
+            const { Op: Op2 } = require('sequelize');
+            const bsRecords = ingIds.length > 0
+                ? await BranchStock.findAll({ where: { ingredient_id: { [Op2.in]: ingIds }, branch_id: parseInt(branchId) } })
+                : [];
+            const tableMap = {};
+            for (const r of bsRecords) tableMap[r.ingredient_id] = parseFloat(r.quantity);
+
             const result = ingredients.map(ing => {
                 const plain = ing.toJSON();
-                const bs = ing.branch_stocks || {};
-                if (branchId in bs) {
-                    plain.stock = parseFloat(bs[branchId]);
-                } else if (Object.keys(bs).length === 0) {
-                    // Sin branch_stocks aún: usar stock global como fallback
-                    plain.stock = parseFloat(ing.stock) || 0;
+                // Tabla primero
+                if (ing.id in tableMap) {
+                    plain.stock = tableMap[ing.id];
                 } else {
-                    // Sucursal no encontrada en branch_stocks → 0
-                    plain.stock = 0;
+                    // Fallback JSON
+                    const bs = ing.branch_stocks || {};
+                    if (branchId in bs) {
+                        plain.stock = parseFloat(bs[branchId]);
+                    } else if (Object.keys(bs).length === 0) {
+                        plain.stock = parseFloat(ing.stock) || 0;
+                    } else {
+                        plain.stock = 0;
+                    }
                 }
                 return plain;
             });
-            return res.json(result);
+            return res.json(paginatedResponse(result, count, page, limit));
         }
-        // Sin branch_id: el campo global 'stock' puede estar desactualizado si se usa branch_stocks.
-        // Calcular stock real sumando todos los valores de branch_stocks.
+        // Sin sucursal: sumar todos los stocks
+        const ingIds = ingredients.map(i => i.id);
+        const { Op: Op3 } = require('sequelize');
+        const allBsRecords = ingIds.length > 0
+            ? await BranchStock.findAll({ where: { ingredient_id: { [Op3.in]: ingIds } } })
+            : [];
+        const tableSumMap = {};
+        for (const r of allBsRecords) {
+            tableSumMap[r.ingredient_id] = (tableSumMap[r.ingredient_id] || 0) + parseFloat(r.quantity);
+        }
+
         const result = ingredients.map(ing => {
             const plain = ing.toJSON();
-            const bs = ing.branch_stocks || {};
-            const vals = Object.values(bs);
-            if (vals.length > 0) {
-                plain.stock = vals.reduce((s, v) => s + (parseFloat(v) || 0), 0);
+            // Tabla primero
+            if (ing.id in tableSumMap) {
+                plain.stock = tableSumMap[ing.id];
+            } else {
+                // Fallback JSON
+                const bs = ing.branch_stocks || {};
+                const vals = Object.values(bs);
+                if (vals.length > 0) {
+                    plain.stock = vals.reduce((s, v) => s + (parseFloat(v) || 0), 0);
+                }
             }
-            // Si branch_stocks está vacío usa el stock global (ya viene en plain.stock)
             return plain;
         });
-        res.json(result);
+        res.json(paginatedResponse(result, count, page, limit));
     } catch (error) {
         res.status(500).json({ error: 'Error interno del servidor' });
     }
@@ -545,18 +612,18 @@ router.post('/movements', authenticate, async (req, res) => {
             return res.status(400).json({ error: 'ingredient_id, tipo y cantidad son requeridos' });
         }
 
-        // Ajuste manual: registrar en auditoría (PIN verificado en el frontend)
+        // Ajuste manual: PIN obligatorio
         let authorizedEmployee = null;
-        if (type === 'ajuste' && employee_id) {
-            if (pin) {
-                try {
-                    authorizedEmployee = await verifyEmployeePin(employee_id, pin, biz);
-                } catch (pinErr) {
-                    await t.rollback();
-                    return res.status(403).json({ error: pinErr.message });
-                }
-            } else {
-                authorizedEmployee = await User.findByPk(employee_id);
+        if (type === 'ajuste') {
+            if (!employee_id || !pin) {
+                await t.rollback();
+                return res.status(400).json({ error: 'Se requiere PIN para esta acción' });
+            }
+            try {
+                authorizedEmployee = await verifyEmployeePin(employee_id, pin, biz);
+            } catch (pinErr) {
+                await t.rollback();
+                return res.status(403).json({ error: pinErr.message });
             }
         }
 
@@ -566,16 +633,25 @@ router.post('/movements', authenticate, async (req, res) => {
             return res.status(404).json({ error: 'Insumo no encontrado' });
         }
 
-        // Stock antes del ajuste (para auditoría)
+        // Stock antes del ajuste (para auditoría) — lectura dual
         const branchKey = branch_id ? String(branch_id) : null;
-        const stockAntes = branchKey
-            ? (() => {
+        let stockAntes;
+        if (branchKey) {
+            const bsRecord = await BranchStock.findOne({
+                where: { ingredient_id, branch_id: parseInt(branchKey) },
+                transaction: t, lock: t.LOCK.UPDATE
+            });
+            if (bsRecord) {
+                stockAntes = parseFloat(bsRecord.quantity);
+            } else {
                 const bs = ingredient.branch_stocks || {};
-                if (branchKey in bs) return parseFloat(bs[branchKey]);
-                if (Object.keys(bs).length === 0) return parseFloat(ingredient.stock) || 0;
-                return 0;
-            })()
-            : parseFloat(ingredient.stock);
+                if (branchKey in bs) stockAntes = parseFloat(bs[branchKey]);
+                else if (Object.keys(bs).length === 0) stockAntes = parseFloat(ingredient.stock) || 0;
+                else stockAntes = 0;
+            }
+        } else {
+            stockAntes = parseFloat(ingredient.stock);
+        }
 
         const movement = await InventoryMovement.create({
             ingredient_id, type, quantity, unit_cost, reason, notes,
@@ -583,19 +659,17 @@ router.post('/movements', authenticate, async (req, res) => {
             branch_id: branch_id || null,
         }, { transaction: t });
 
-        const currentStock = branchKey
-            ? (() => {
-                const bs = ingredient.branch_stocks || {};
-                if (branchKey in bs) return parseFloat(bs[branchKey]);
-                if (Object.keys(bs).length === 0) return parseFloat(ingredient.stock) || 0;
-                return 0;
-            })()
-            : parseFloat(ingredient.stock);
+        const currentStock = stockAntes;
 
         let newStock = currentStock;
         if (type === 'entrada') {
             newStock += parseFloat(quantity);
             if (branchKey) {
+                // Escritura dual: tabla + JSON
+                await BranchStock.upsert({
+                    ingredient_id, branch_id: parseInt(branchKey),
+                    quantity: newStock, business_id: biz
+                }, { transaction: t });
                 const bs = { ...(ingredient.branch_stocks || {}), [branchKey]: newStock };
                 await ingredient.update({ branch_stocks: bs }, { transaction: t });
             } else if (unit_cost) {
@@ -609,6 +683,10 @@ router.post('/movements', authenticate, async (req, res) => {
         } else if (type === 'salida') {
             newStock -= parseFloat(quantity);
             if (branchKey) {
+                await BranchStock.upsert({
+                    ingredient_id, branch_id: parseInt(branchKey),
+                    quantity: newStock, business_id: biz
+                }, { transaction: t });
                 const bs = { ...(ingredient.branch_stocks || {}), [branchKey]: newStock };
                 await ingredient.update({ branch_stocks: bs }, { transaction: t });
             } else {
@@ -616,6 +694,10 @@ router.post('/movements', authenticate, async (req, res) => {
             }
         } else if (type === 'ajuste') {
             if (branchKey) {
+                await BranchStock.upsert({
+                    ingredient_id, branch_id: parseInt(branchKey),
+                    quantity: parseFloat(quantity), business_id: biz
+                }, { transaction: t });
                 const bs = { ...(ingredient.branch_stocks || {}), [branchKey]: parseFloat(quantity) };
                 await ingredient.update({ branch_stocks: bs }, { transaction: t });
             } else {
@@ -658,6 +740,53 @@ router.post('/movements', authenticate, async (req, res) => {
     } catch (error) {
         await t.rollback();
         res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// ============================================
+// MIGRACIÓN: branch_stocks JSON → tabla BranchStock
+// GET /api/inventory/migrate-branch-stocks (solo owner)
+// ============================================
+router.get('/migrate-branch-stocks', authenticate, isOwner, async (req, res) => {
+    const t = await sequelize.transaction();
+    try {
+        const biz = req.user.business_id;
+        const ingredients = await Ingredient.findAll({
+            where: { business_id: biz, active: true },
+            transaction: t
+        });
+
+        let migrated = 0;
+        let skipped = 0;
+
+        for (const ing of ingredients) {
+            const bs = ing.branch_stocks || {};
+            const entries = Object.entries(bs);
+            if (entries.length === 0) { skipped++; continue; }
+
+            for (const [branchId, qty] of entries) {
+                const quantity = parseFloat(qty) || 0;
+                await BranchStock.upsert({
+                    ingredient_id: ing.id,
+                    branch_id: parseInt(branchId),
+                    quantity,
+                    business_id: biz
+                }, { transaction: t });
+            }
+            migrated++;
+        }
+
+        await t.commit();
+        res.json({
+            message: 'Migración completada',
+            total_ingredientes: ingredients.length,
+            migrados: migrated,
+            sin_branch_stocks: skipped
+        });
+    } catch (error) {
+        await t.rollback();
+        logger.error('migrate-branch-stocks error:', error);
+        res.status(500).json({ error: 'Error en la migración' });
     }
 });
 

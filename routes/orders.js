@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
-const { Order, OrderItem, Product, Customer, Table, ProductRecipe, Ingredient, PreparationItem, PrivilegedActionLog, User, Discount, sequelize } = require('../models');
+const logger = require('../utils/logger');
+const { Order, OrderItem, Product, Customer, Table, ProductRecipe, Ingredient, PreparationItem, PrivilegedActionLog, BranchStock, User, Discount, sequelize } = require('../models');
 const { authenticate } = require('../middleware/auth');
 const { verifyEmployeePin } = require('../utils/verifyPin');
 const { Op } = require('sequelize');
@@ -77,9 +78,16 @@ function convertirUnidad(cantidad, unidadReceta, ingrediente) {
     return cantidad;
 }
 
-// Helpers de stock por sucursal
-function getBranchStock(ingredient, branchId) {
+// Helpers de stock por sucursal (lectura dual: tabla BranchStock primero, fallback JSON)
+async function getBranchStock(ingredient, branchId, transaction) {
     if (!branchId) return parseFloat(ingredient.stock);
+    // Tabla primero
+    const record = await BranchStock.findOne({
+        where: { ingredient_id: ingredient.id, branch_id: parseInt(branchId) },
+        ...(transaction ? { transaction, lock: transaction.LOCK.UPDATE } : {})
+    });
+    if (record) return parseFloat(record.quantity);
+    // Fallback JSON
     const bs = ingredient.branch_stocks || {};
     const key = String(branchId);
     if (key in bs) return parseFloat(bs[key]);
@@ -87,10 +95,19 @@ function getBranchStock(ingredient, branchId) {
     return 0;
 }
 
+// Escritura dual: tabla BranchStock + campo JSON (coexistencia)
 async function setBranchStock(ingredient, branchId, newStock, transaction) {
     if (!branchId) {
         await ingredient.update({ stock: newStock }, { transaction });
     } else {
+        // Escribir en tabla BranchStock
+        await BranchStock.upsert({
+            ingredient_id: ingredient.id,
+            branch_id: parseInt(branchId),
+            quantity: newStock,
+            business_id: ingredient.business_id
+        }, { transaction });
+        // Dual-write: actualizar también el campo JSON
         const bs = { ...(ingredient.branch_stocks || {}) };
         bs[String(branchId)] = newStock;
         await ingredient.update({ branch_stocks: bs }, { transaction });
@@ -107,7 +124,7 @@ async function descontarIngredientesDeReceta(productId, qty, t, branchId = null)
             const ingrediente = await Ingredient.findByPk(item.item_id, { transaction: t, lock: t.LOCK.UPDATE });
             if (!ingrediente) continue;
             const cantDescontar = convertirUnidad(parseFloat(item.quantity), item.unit_recipe, ingrediente) * qty;
-            const stockActual = getBranchStock(ingrediente, branchId);
+            const stockActual = await getBranchStock(ingrediente, branchId, t);
             await setBranchStock(ingrediente, branchId, Math.max(0, stockActual - cantDescontar), t);
 
         } else if (item.item_type === 'preparation') {
@@ -121,7 +138,7 @@ async function descontarIngredientesDeReceta(productId, qty, t, branchId = null)
             for (const pi of prepItems) {
                 if (!pi.ingredient) continue;
                 const cantDescontar = convertirUnidad(parseFloat(pi.quantity), pi.unit_recipe, pi.ingredient) * cantPrep;
-                const stockActual = getBranchStock(pi.ingredient, branchId);
+                const stockActual = await getBranchStock(pi.ingredient, branchId, t);
                 await setBranchStock(pi.ingredient, branchId, Math.max(0, stockActual - cantDescontar), t);
             }
         }
@@ -137,7 +154,7 @@ async function restaurarIngredientesDeReceta(productId, qty, t, branchId = null)
             const ingrediente = await Ingredient.findByPk(item.item_id, { transaction: t, lock: t.LOCK.UPDATE });
             if (!ingrediente) continue;
             const cantRestaurar = convertirUnidad(parseFloat(item.quantity), item.unit_recipe, ingrediente) * qty;
-            const stockActual = getBranchStock(ingrediente, branchId);
+            const stockActual = await getBranchStock(ingrediente, branchId, t);
             await setBranchStock(ingrediente, branchId, stockActual + cantRestaurar, t);
 
         } else if (item.item_type === 'preparation') {
@@ -151,7 +168,7 @@ async function restaurarIngredientesDeReceta(productId, qty, t, branchId = null)
             for (const pi of prepItems) {
                 if (!pi.ingredient) continue;
                 const cantRestaurar = convertirUnidad(parseFloat(pi.quantity), pi.unit_recipe, pi.ingredient) * cantPrep;
-                const stockActual = getBranchStock(pi.ingredient, branchId);
+                const stockActual = await getBranchStock(pi.ingredient, branchId, t);
                 await setBranchStock(pi.ingredient, branchId, stockActual + cantRestaurar, t);
             }
         }
@@ -206,6 +223,12 @@ router.get('/', authenticate, async (req, res) => {
                         as: 'product',
                         attributes: ['id', 'name', 'emoji', 'image']
                     }]
+                },
+                {
+                    model: User,
+                    as: 'creator',
+                    attributes: ['id', 'name'],
+                    required: false
                 }
             ],
             order: [['createdAt', 'DESC']],
@@ -248,6 +271,12 @@ router.get('/:id', authenticate, async (req, res) => {
                         as: 'product',
                         attributes: ['id', 'name', 'description', 'emoji', 'image']
                     }]
+                },
+                {
+                    model: User,
+                    as: 'creator',
+                    attributes: ['id', 'name'],
+                    required: false
                 }
             ]
         });
@@ -349,6 +378,10 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
 
             const qty = Math.max(1, parseInt(item.quantity) || 1);
             const unitPrice = parseFloat(product.price);
+            if (!Number.isFinite(unitPrice) || unitPrice <= 0) {
+                await t.rollback();
+                return res.status(400).json({ error: `Precio inválido para el producto ${product.name || productId}` });
+            }
             const subtotal = parseFloat((qty * unitPrice).toFixed(2));
             calculatedTotal += subtotal;
 
@@ -376,6 +409,7 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
             branch_id: branch_id || null,
             table_id: table_id || null,
             guests: guests ? parseInt(guests) : null,
+            created_by: req.user.id,
         }, { transaction: t });
 
         for (const { product, qty, unitPrice, subtotal, notes: itemNotes } of resolvedItems) {
@@ -423,7 +457,8 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
                     model: OrderItem,
                     as: 'items',
                     include: [{ model: Product, as: 'product', attributes: ['id', 'name', 'emoji', 'image'] }]
-                }
+                },
+                { model: User, as: 'creator', attributes: ['id', 'name'], required: false }
             ]
         });
 
@@ -436,10 +471,10 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
                 const recetaItems = await ProductRecipe.findAll({ where: { product_id: product.id } });
                 for (const ri of recetaItems) {
                     if (ri.item_type === 'ingredient' && !ingNotificados.has(ri.item_id)) {
-                        const ing = await Ingredient.findByPk(ri.item_id, { attributes: ['id', 'name', 'stock', 'min_stock', 'branch_stocks'] });
+                        const ing = await Ingredient.findByPk(ri.item_id, { attributes: ['id', 'name', 'stock', 'min_stock', 'branch_stocks', 'business_id'] });
                         if (!ing) continue;
                         const branchId = branch_id || null;
-                        const stockActual = getBranchStock(ing, branchId);
+                        const stockActual = await getBranchStock(ing, branchId);
                         const minStock = parseFloat(ing.min_stock) || 0;
                         if (stockActual <= minStock && minStock > 0) {
                             ingNotificados.add(ri.item_id);
@@ -469,7 +504,7 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
         res.status(201).json(fullOrder);
     } catch (error) {
         await t.rollback();
-        console.error('Create order error:', error);
+        logger.error('Create order error:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
@@ -514,6 +549,10 @@ router.post('/:id/items', authenticate, async (req, res) => {
             }
             const qty = Math.max(1, parseInt(item.quantity) || 1);
             const unitPrice = parseFloat(product.price);
+            if (!Number.isFinite(unitPrice) || unitPrice <= 0) {
+                await t.rollback();
+                return res.status(400).json({ error: `Precio inválido para el producto ${product.name || productId}` });
+            }
             const subtotal = parseFloat((qty * unitPrice).toFixed(2));
             additionalTotal += subtotal;
 
@@ -545,7 +584,7 @@ router.post('/:id/items', authenticate, async (req, res) => {
         res.json(updated);
     } catch (error) {
         await t.rollback();
-        console.error('Add items to order error:', error);
+        logger.error('Add items to order error:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
@@ -590,7 +629,7 @@ router.delete('/:id/items/:itemId', authenticate, async (req, res) => {
         res.json(updated);
     } catch (error) {
         await t.rollback();
-        console.error('Delete order item error:', error);
+        logger.error('Delete order item error:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
@@ -611,17 +650,16 @@ router.put('/:id/status', authenticate, async (req, res) => {
             return res.status(404).json({ error: 'Pedido no encontrado' });
         }
 
-        // Si se está cancelando: registrar en auditoría (PIN verificado en el frontend)
+        // Si se está cancelando: requiere PIN obligatorio
         let authorizedEmployee = null;
-        if (status === 'cancelado' && employee_id) {
-            if (pin) {
-                try {
-                    authorizedEmployee = await verifyEmployeePin(employee_id, pin, biz);
-                } catch (pinErr) {
-                    return res.status(403).json({ error: pinErr.message });
-                }
-            } else {
-                authorizedEmployee = await User.findByPk(employee_id);
+        if (status === 'cancelado') {
+            if (!employee_id || !pin) {
+                return res.status(400).json({ error: 'Se requiere PIN para esta acción' });
+            }
+            try {
+                authorizedEmployee = await verifyEmployeePin(employee_id, pin, biz);
+            } catch (pinErr) {
+                return res.status(403).json({ error: pinErr.message });
             }
         }
 
@@ -703,15 +741,17 @@ router.delete('/:id', authenticate, async (req, res) => {
         const biz = req.user.business_id;
         const { employee_id, pin } = req.body || {};
 
-        // Verificar PIN si se proporcionó
+        // PIN obligatorio para eliminar pedidos
+        if (!employee_id || !pin) {
+            await t.rollback();
+            return res.status(400).json({ error: 'Se requiere PIN para esta acción' });
+        }
         let authorizedEmployee = null;
-        if (employee_id && pin) {
-            try {
-                authorizedEmployee = await verifyEmployeePin(employee_id, pin, biz);
-            } catch (pinErr) {
-                await t.rollback();
-                return res.status(403).json({ error: pinErr.message });
-            }
+        try {
+            authorizedEmployee = await verifyEmployeePin(employee_id, pin, biz);
+        } catch (pinErr) {
+            await t.rollback();
+            return res.status(403).json({ error: pinErr.message });
         }
 
         const order = await Order.findOne({

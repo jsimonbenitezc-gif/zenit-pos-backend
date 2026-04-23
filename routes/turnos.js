@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const logger = require('../utils/logger');
 const { Op } = require('sequelize');
 const { Turno, Order, sequelize } = require('../models');
 const { authenticate } = require('../middleware/auth');
@@ -60,7 +61,7 @@ router.get('/activo', authenticate, async (req, res) => {
         if (!turno) return res.json(null);
         res.json(turno);
     } catch (error) {
-        console.error('Error al obtener turno activo:', error);
+        logger.error('Error al obtener turno activo:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
@@ -78,7 +79,7 @@ router.get('/historial', authenticate, async (req, res) => {
         });
         res.json(turnos);
     } catch (error) {
-        console.error('Error al obtener historial de turnos:', error);
+        logger.error('Error al obtener historial de turnos:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
@@ -139,7 +140,7 @@ router.post('/', authenticate, async (req, res) => {
         if (error.name === 'SequelizeUniqueConstraintError') {
             return res.status(400).json({ error: 'Ya hay un turno abierto' });
         }
-        console.error('Error al abrir turno:', error);
+        logger.error('Error al abrir turno:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
@@ -184,7 +185,7 @@ router.get('/:id/totales', authenticate, async (req, res) => {
             total_transferencia: parseFloat(totalTransferencia.toFixed(2))
         });
     } catch (error) {
-        console.error('Error calculando totales de turno:', error);
+        logger.error('Error calculando totales de turno:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
@@ -273,7 +274,7 @@ router.put('/:id/cerrar', authenticate, async (req, res) => {
 
         res.json(turno);
     } catch (error) {
-        console.error('Error al cerrar turno:', error);
+        logger.error('Error al cerrar turno:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });

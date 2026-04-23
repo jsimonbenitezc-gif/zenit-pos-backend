@@ -3,6 +3,8 @@ const router = express.Router();
 const { Product, Category } = require('../models');
 const { authenticate, isOwner } = require('../middleware/auth');
 const rateLimit = require('express-rate-limit');
+const { Op } = require('sequelize');
+const { paginate, paginatedResponse } = require('../utils/pagination');
 
 // Protección: máximo 30 productos por minuto por IP
 const createProductLimiter = rateLimit({
@@ -17,24 +19,28 @@ const createProductLimiter = rateLimit({
 router.get('/', authenticate, async (req, res) => {
     try {
         const biz = req.user.business_id;
-        const { active, category_id } = req.query;
+        const { active, category_id, search } = req.query;
+        const { page, limit, offset } = paginate(req.query);
 
         const where = { business_id: biz };
         if (active !== undefined) where.active = active === 'true';
         else where.active = true;
         if (category_id) where.category_id = category_id;
+        if (search) where.name = { [Op.iLike]: `%${search}%` };
 
-        const products = await Product.findAll({
+        const { count, rows } = await Product.findAndCountAll({
             where,
             include: [{
                 model: Category,
                 as: 'category',
                 attributes: ['id', 'name', 'emoji']
             }],
-            order: [['name', 'ASC']]
+            order: [['name', 'ASC']],
+            limit,
+            offset
         });
 
-        res.json(products);
+        res.json(paginatedResponse(rows, count, page, limit));
     } catch (error) {
         res.status(500).json({ error: 'Error interno del servidor' });
     }
@@ -81,7 +87,7 @@ router.get('/grouped', authenticate, async (req, res) => {
             result.push({
                 id: null,
                 name: 'Sin categoría',
-                emoji: '📦',
+                emoji: 'svg:package',
                 products: uncategorized.map(p => ({
                     id: p.id,
                     name: p.name,
@@ -141,7 +147,7 @@ router.post('/', createProductLimiter, authenticate, isOwner, async (req, res) =
             price,
             stock: stock || 0,
             category_id,
-            emoji: emoji || '📦',
+            emoji: emoji || 'svg:package',
             image,
             business_id: biz
         });

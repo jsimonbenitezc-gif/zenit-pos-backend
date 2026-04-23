@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const logger = require('../utils/logger');
 const { Customer, Order, PrivilegedActionLog, User, sequelize } = require('../models');
 const { authenticate, isOwner } = require('../middleware/auth');
 const { verifyEmployeePin } = require('../utils/verifyPin');
@@ -7,6 +8,7 @@ const { Op } = require('sequelize');
 const { notificarAudit } = require('./audit');
 const { enviarNotificacion } = require('../utils/push');
 const rateLimit = require('express-rate-limit');
+const { paginate, paginatedResponse } = require('../utils/pagination');
 
 // Protección: máximo 30 clientes por minuto por IP
 const createCustomerLimiter = rateLimit({
@@ -21,13 +23,21 @@ const createCustomerLimiter = rateLimit({
 router.get('/', authenticate, async (req, res) => {
     try {
         const biz = req.user.business_id;
-        const customers = await Customer.findAll({
-            where: { active: true, business_id: biz },
-            order: [['name', 'ASC']]
+        const { search } = req.query;
+        const { page, limit, offset } = paginate(req.query);
+
+        const where = { active: true, business_id: biz };
+        if (search) where.name = { [Op.iLike]: `%${search}%` };
+
+        const { count, rows } = await Customer.findAndCountAll({
+            where,
+            order: [['name', 'ASC']],
+            limit,
+            offset
         });
-        res.json(customers);
+        res.json(paginatedResponse(rows, count, page, limit));
     } catch (error) {
-        console.error('Error al obtener clientes:', error);
+        logger.error('Error al obtener clientes:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
@@ -55,7 +65,7 @@ router.get('/with-stats', authenticate, async (req, res) => {
         });
         res.json(customers);
     } catch (error) {
-        console.error('Error al obtener clientes con stats:', error);
+        logger.error('Error al obtener clientes con stats:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
@@ -110,7 +120,7 @@ router.get('/stats', authenticate, async (req, res) => {
 
         res.json({ totalClientes, clientesNuevos, clientesFrecuentes: clientesFrecuentes.length || 0, topClientesMes });
     } catch (error) {
-        console.error('Error al obtener stats de clientes:', error);
+        logger.error('Error al obtener stats de clientes:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
@@ -135,7 +145,7 @@ router.get('/:id', authenticate, async (req, res) => {
         }
         res.json(customer);
     } catch (error) {
-        console.error('Error al obtener cliente:', error);
+        logger.error('Error al obtener cliente:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
@@ -177,7 +187,7 @@ router.post('/', createCustomerLimiter, authenticate, async (req, res) => {
 
         res.status(201).json(customer);
     } catch (error) {
-        console.error('Error al crear cliente:', error);
+        logger.error('Error al crear cliente:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
@@ -209,17 +219,16 @@ router.put('/:id', authenticate, async (req, res) => {
             }
         }
 
-        // Registrar en auditoría (PIN verificado en el frontend)
+        // PIN obligatorio si se envía employee_id (acción auditada)
         let authorizedEmployee = null;
         if (employee_id) {
-            if (pin) {
-                try {
-                    authorizedEmployee = await verifyEmployeePin(employee_id, pin, biz);
-                } catch (pinErr) {
-                    return res.status(403).json({ error: pinErr.message });
-                }
-            } else {
-                authorizedEmployee = await User.findByPk(employee_id);
+            if (!pin) {
+                return res.status(400).json({ error: 'Se requiere PIN para esta acción' });
+            }
+            try {
+                authorizedEmployee = await verifyEmployeePin(employee_id, pin, biz);
+            } catch (pinErr) {
+                return res.status(403).json({ error: pinErr.message });
             }
         }
 
@@ -263,7 +272,7 @@ router.put('/:id', authenticate, async (req, res) => {
 
         res.json(customer);
     } catch (error) {
-        console.error('Error al actualizar cliente:', error);
+        logger.error('Error al actualizar cliente:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
@@ -295,7 +304,7 @@ router.patch('/:id/loyalty', authenticate, async (req, res) => {
 
         res.json(customer);
     } catch (error) {
-        console.error('Error al actualizar fidelidad:', error);
+        logger.error('Error al actualizar fidelidad:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
@@ -313,7 +322,7 @@ router.delete('/:id', authenticate, isOwner, async (req, res) => {
         await customer.update({ active: false });
         res.json({ message: 'Cliente eliminado correctamente' });
     } catch (error) {
-        console.error('Error al eliminar cliente:', error);
+        logger.error('Error al eliminar cliente:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });

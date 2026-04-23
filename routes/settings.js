@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const logger = require('../utils/logger');
 const crypto = require('crypto');
 const bcrypt = require('bcrypt');
 const rateLimit = require('express-rate-limit');
@@ -69,7 +70,7 @@ router.get('/', authenticate, async (req, res) => {
         const settings = user.settings ? JSON.parse(user.settings) : {};
         res.json(settings);
     } catch (error) {
-        console.error('Error al obtener ajustes:', error);
+        logger.error('Error al obtener ajustes:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
@@ -116,7 +117,7 @@ router.put('/', authenticate, async (req, res) => {
         _notificarSettings(req.user.business_id);
         res.json(updated);
     } catch (error) {
-        console.error('Error al guardar ajustes:', error);
+        logger.error('Error al guardar ajustes:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
@@ -190,7 +191,7 @@ router.post('/verify-pin', pinLimiter, authenticate, async (req, res) => {
 
         res.json({ valid });
     } catch (error) {
-        console.error('Error en verify-pin (settings):', error);
+        logger.error('Error en verify-pin (settings):', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
@@ -205,7 +206,7 @@ router.post('/hash-pin', pinLimiter, authenticate, async (req, res) => {
         const hash = await bcrypt.hash(pin, 10);
         res.json({ hash });
     } catch (error) {
-        console.error('Error en hash-pin:', error);
+        logger.error('Error en hash-pin:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });

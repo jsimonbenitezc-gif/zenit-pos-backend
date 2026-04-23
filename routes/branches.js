@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const logger = require('../utils/logger');
 const { Branch, Category, Discount, Combo, ComboItem, Ingredient } = require('../models');
 const { authenticate, isOwner } = require('../middleware/auth');
 const { requirePremium } = require('../middleware/checkPlan');
@@ -23,7 +24,7 @@ router.get('/', authenticate, async (req, res) => {
         }
         res.json(branches);
     } catch (error) {
-        console.error('Error al obtener sucursales:', error);
+        logger.error('Error al obtener sucursales:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
@@ -91,7 +92,7 @@ router.post('/', authenticate, requirePremium, isOwner, async (req, res) => {
 
         res.status(201).json(branch);
     } catch (error) {
-        console.error('Error al crear sucursal:', error);
+        logger.error('Error al crear sucursal:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
@@ -107,7 +108,7 @@ router.put('/:id', authenticate, requirePremium, isOwner, async (req, res) => {
         await branch.update({ name, address, phone });
         res.json(branch);
     } catch (error) {
-        console.error('Error al actualizar sucursal:', error);
+        logger.error('Error al actualizar sucursal:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
@@ -122,7 +123,7 @@ router.delete('/:id', authenticate, requirePremium, isOwner, async (req, res) =>
         await branch.update({ active: false });
         res.json({ message: 'Sucursal desactivada correctamente' });
     } catch (error) {
-        console.error('Error al eliminar sucursal:', error);
+        logger.error('Error al eliminar sucursal:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });

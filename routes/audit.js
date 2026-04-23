@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const logger = require('../utils/logger');
 const { PrivilegedActionLog, Branch } = require('../models');
 const { authenticate, isOwner } = require('../middleware/auth');
 const jwt = require('jsonwebtoken');
@@ -80,7 +81,7 @@ router.get('/', authenticate, isOwner, async (req, res) => {
             }
         });
     } catch (error) {
-        console.error('Error al obtener logs de auditoría:', error);
+        logger.error('Error al obtener logs de auditoría:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
@@ -121,7 +122,7 @@ router.post('/', authenticate, async (req, res) => {
 
         res.status(201).json(log);
     } catch (error) {
-        console.error('Error al registrar acción de auditoría:', error);
+        logger.error('Error al registrar acción de auditoría:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });

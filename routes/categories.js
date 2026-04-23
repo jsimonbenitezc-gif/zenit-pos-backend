@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const logger = require('../utils/logger');
 const { Category } = require('../models');
 const { authenticate, isOwner } = require('../middleware/auth');
 
@@ -13,7 +14,7 @@ router.get('/', authenticate, async (req, res) => {
         });
         res.json(categories);
     } catch (error) {
-        console.error('Error al obtener categorías:', error);
+        logger.error('Error al obtener categorías:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
@@ -30,7 +31,7 @@ router.get('/:id', authenticate, async (req, res) => {
         }
         res.json(category);
     } catch (error) {
-        console.error('Error al obtener categoría:', error);
+        logger.error('Error al obtener categoría:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
@@ -46,7 +47,10 @@ router.post('/', authenticate, isOwner, async (req, res) => {
         const category = await Category.create({ name, emoji, image, business_id: biz });
         res.status(201).json(category);
     } catch (error) {
-        console.error('Error al crear categoría:', error);
+        if (error.name === 'SequelizeUniqueConstraintError' || (error.original && error.original.constraint === 'uq_categories_business_name')) {
+            return res.status(409).json({ error: 'Ya existe una categoría con ese nombre' });
+        }
+        logger.error('Error al crear categoría:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
@@ -65,7 +69,10 @@ router.put('/:id', authenticate, isOwner, async (req, res) => {
         await category.update({ name, emoji, image });
         res.json(category);
     } catch (error) {
-        console.error('Error al actualizar categoría:', error);
+        if (error.name === 'SequelizeUniqueConstraintError' || (error.original && error.original.constraint === 'uq_categories_business_name')) {
+            return res.status(409).json({ error: 'Ya existe una categoría con ese nombre' });
+        }
+        logger.error('Error al actualizar categoría:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
@@ -83,7 +90,7 @@ router.delete('/:id', authenticate, isOwner, async (req, res) => {
         await category.update({ active: false });
         res.json({ message: 'Categoría eliminada correctamente' });
     } catch (error) {
-        console.error('Error al eliminar categoría:', error);
+        logger.error('Error al eliminar categoría:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
