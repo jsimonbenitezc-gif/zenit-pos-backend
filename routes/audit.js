@@ -3,7 +3,7 @@ const router = express.Router();
 const logger = require('../utils/logger');
 const { PrivilegedActionLog, Branch } = require('../models');
 const { authenticate, isOwner } = require('../middleware/auth');
-const jwt = require('jsonwebtoken');
+const { configurarSSE } = require('../utils/sse');
 const { enviarNotificacion } = require('../utils/push');
 
 // ── SSE: notificaciones en tiempo real de nuevas acciones privilegiadas ────
@@ -14,40 +14,13 @@ function _notificarAudit(businessId) {
     if (!clients || clients.size === 0) return;
     const msg = `data: {}\n\n`;
     for (const res of clients) {
-        try { res.write(msg); } catch { /* cliente desconectado */ }
+        if (res.writableEnded) { clients.delete(res); continue; }
+        try { res.write(msg); } catch { clients.delete(res); }
     }
 }
 
-// GET /api/audit/events — SSE stream para el dashboard del dueño
-// Auth via Authorization header (preferred) or query param ?token=JWT (fallback for desktop)
 router.get('/events', (req, res) => {
-    const token = (req.headers.authorization?.startsWith('Bearer ') && req.headers.authorization.slice(7)) || req.query.token;
-    if (!token) return res.status(401).end();
-    let businessId;
-    try {
-        const payload = jwt.verify(token, process.env.JWT_SECRET);
-        businessId = payload.business_id;
-    } catch {
-        return res.status(401).end();
-    }
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-    res.setHeader('X-Accel-Buffering', 'no');
-    res.flushHeaders();
-
-    const heartbeat = setInterval(() => {
-        try { res.write(': ping\n\n'); } catch { clearInterval(heartbeat); }
-    }, 25000);
-
-    const biz = String(businessId);
-    if (!_auditClients.has(biz)) _auditClients.set(biz, new Set());
-    _auditClients.get(biz).add(res);
-
-    req.on('close', () => {
-        clearInterval(heartbeat);
-        _auditClients.get(biz)?.delete(res);
-    });
+    configurarSSE(_auditClients, req, res);
 });
 
 // GET /api/audit — Listar registros de acciones privilegiadas (solo dueño)

@@ -139,6 +139,13 @@ app.get('/health', async (req, res) => {
     }
 });
 
+// ─── POST /api/sse-ticket — Ticket SSE de un solo uso (30 segundos) ──────────
+const { crearTicket } = require('./utils/sse-tickets');
+app.post('/api/sse-ticket', authenticate, (req, res) => {
+    const ticket = crearTicket(req.user.business_id);
+    res.json({ ticket });
+});
+
 // API Routes
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/products', require('./routes/products'));
