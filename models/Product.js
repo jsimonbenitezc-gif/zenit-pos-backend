@@ -33,7 +33,7 @@ const Product = sequelize.define('Product', {
     },
     emoji: {
         type: DataTypes.STRING,
-        defaultValue: '📦'
+        defaultValue: 'svg:package'
     },
     image: {
         type: DataTypes.STRING,

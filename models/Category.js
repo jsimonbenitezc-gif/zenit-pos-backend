@@ -13,7 +13,7 @@ const Category = sequelize.define('Category', {
     },
     emoji: {
         type: DataTypes.STRING,
-        defaultValue: '📦'
+        defaultValue: 'svg:package'
     },
     image: {
         type: DataTypes.STRING,
