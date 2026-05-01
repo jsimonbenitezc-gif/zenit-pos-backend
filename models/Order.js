@@ -57,7 +57,12 @@ const Order = sequelize.define('Order', {
     },
     branch_id: {
         type: DataTypes.INTEGER,
-        allowNull: true
+        allowNull: true,
+        references: {
+            model: 'Branches',
+            key: 'id'
+        },
+        onDelete: 'SET NULL'
     },
     discount_amount: {
         type: DataTypes.DECIMAL(10, 2),
