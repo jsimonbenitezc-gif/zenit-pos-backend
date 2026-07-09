@@ -38,6 +38,10 @@ const PrivilegedActionLog = require('./PrivilegedActionLog');
 // Idempotencia de webhooks Stripe
 const ProcessedWebhook = require('./ProcessedWebhook');
 
+// Lista de compras
+const ShoppingList = require('./ShoppingList');
+const ShoppingListItem = require('./ShoppingListItem');
+
 // Objeto con todos los modelos
 const models = {
     User,
@@ -60,6 +64,8 @@ const models = {
     Turno,
     PrivilegedActionLog,
     ProcessedWebhook,
+    ShoppingList,
+    ShoppingListItem,
 };
 
 // Definir relaciones
@@ -131,6 +137,13 @@ const setupRelations = () => {
     models.BranchStock.belongsTo(models.Ingredient, { foreignKey: 'ingredient_id', as: 'ingredient' });
     models.Branch.hasMany(models.BranchStock, { foreignKey: 'branch_id', as: 'branchStocks' });
     models.BranchStock.belongsTo(models.Branch, { foreignKey: 'branch_id', as: 'branch' });
+
+    // ShoppingList <-> ShoppingListItem
+    models.ShoppingList.hasMany(models.ShoppingListItem, { foreignKey: 'list_id', as: 'items', onDelete: 'CASCADE' });
+    models.ShoppingListItem.belongsTo(models.ShoppingList, { foreignKey: 'list_id', as: 'list' });
+
+    // ShoppingList <-> Branch
+    models.ShoppingList.belongsTo(models.Branch, { foreignKey: 'branch_id', as: 'branch' });
 };
 
 // Las migraciones ahora se ejecutan via sequelize-cli.

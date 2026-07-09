@@ -164,6 +164,7 @@ app.use('/api/turnos',   require('./routes/turnos'));
 app.use('/api/audit',    require('./routes/audit'));
 app.use('/api/push',     require('./routes/push'));
 app.use('/api/exports',  require('./routes/exports'));
+app.use('/api/shopping-list', require('./routes/shoppingList'));
 
 // Sentry error handler (debe ir después de las rutas y antes de otros error handlers)
 if (process.env.SENTRY_DSN) {

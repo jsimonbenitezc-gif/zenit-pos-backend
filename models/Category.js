@@ -16,7 +16,8 @@ const Category = sequelize.define('Category', {
         defaultValue: 'svg:package'
     },
     image: {
-        type: DataTypes.STRING,
+        // TEXT: guarda data URIs base64 comprimidos (imagen visible en todos los dispositivos)
+        type: DataTypes.TEXT,
         allowNull: true
     },
     active: {
