@@ -21,7 +21,10 @@ if (process.env.NODE_ENV === 'test') {
             dialect: 'postgres',
             logging: process.env.NODE_ENV === 'development' ? console.log : false,
             pool: {
-                max: 20,
+                // Supabase pooler en session mode limita a 15 clientes.
+                // Mantener max por debajo de ese tope evita EMAXCONNSESSION
+                // (500 intermitentes) cuando el desktop dispara la ráfaga de sync inicial.
+                max: 10,
                 min: 2,
                 acquire: 30000,
                 idle: 10000

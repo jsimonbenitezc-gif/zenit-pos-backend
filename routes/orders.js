@@ -106,7 +106,9 @@ async function descontarIngredientesDeReceta(productId, qty, t, branchId = null)
                 where: { preparation_id: item.item_id },
                 include: [{ model: Ingredient, as: 'ingredient' }],
                 transaction: t,
-                lock: t.LOCK.UPDATE
+                // Bloquear solo preparation_items: Postgres no permite FOR UPDATE
+                // sobre el lado nullable (ingredients) de un LEFT OUTER JOIN.
+                lock: { level: t.LOCK.UPDATE, of: PreparationItem }
             });
             const cantPrep = parseFloat(item.quantity) * qty;
             for (const pi of prepItems) {
@@ -197,7 +199,9 @@ async function restaurarIngredientesDeReceta(productId, qty, t, branchId = null)
                 where: { preparation_id: item.item_id },
                 include: [{ model: Ingredient, as: 'ingredient' }],
                 transaction: t,
-                lock: t.LOCK.UPDATE
+                // Bloquear solo preparation_items: Postgres no permite FOR UPDATE
+                // sobre el lado nullable (ingredients) de un LEFT OUTER JOIN.
+                lock: { level: t.LOCK.UPDATE, of: PreparationItem }
             });
             const cantPrep = parseFloat(item.quantity) * qty;
             for (const pi of prepItems) {
