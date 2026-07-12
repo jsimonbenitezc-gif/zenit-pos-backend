@@ -214,6 +214,46 @@ async function restaurarIngredientesDeReceta(productId, qty, t, branchId = null)
     }
 }
 
+// Notificaciones push tras una venta (stock bajo / venta grande).
+// Corre en segundo plano: no debe bloquear la respuesta del POS.
+async function procesarNotificacionesVenta(biz, resolvedItems, branchId, finalTotal, paymentMethod) {
+    const prefs = await getPrefs(biz);
+
+    if (prefs.notif_stock_cero !== false) {
+        const ingNotificados = new Set();
+        for (const { product } of resolvedItems) {
+            const recetaItems = await ProductRecipe.findAll({ where: { product_id: product.id } });
+            for (const ri of recetaItems) {
+                if (ri.item_type === 'ingredient' && !ingNotificados.has(ri.item_id)) {
+                    const ing = await Ingredient.findByPk(ri.item_id, { attributes: ['id', 'name', 'stock', 'min_stock', 'branch_stocks', 'business_id'] });
+                    if (!ing) continue;
+                    const stockActual = await getBranchStock(ing, branchId);
+                    const minStock = parseFloat(ing.min_stock) || 0;
+                    if (stockActual <= minStock && minStock > 0) {
+                        ingNotificados.add(ri.item_id);
+                        enviarNotificacion(
+                            biz,
+                            null,
+                            '⚠️ Insumo con stock bajo',
+                            `"${ing.name}" tiene ${stockActual.toFixed(1)} (mínimo: ${minStock})`
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    const umbralVenta = parseFloat(prefs.notif_venta_grande_umbral ?? 500);
+    if (prefs.notif_venta_grande !== false && finalTotal >= umbralVenta) {
+        enviarNotificacion(
+            biz,
+            null,
+            '💰 Venta grande registrada',
+            `$${finalTotal.toFixed(2)} · ${resolvedItems.length} producto(s) · ${paymentMethod || 'efectivo'}`
+        );
+    }
+}
+
 // GET /api/orders
 router.get('/', authenticate, async (req, res) => {
     try {
@@ -513,46 +553,14 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
             ]
         });
 
-        // Push notification: insumo sin stock (basado en niveles de ingredientes, no product.stock)
-        const prefs = await getPrefs(biz);
-        if (prefs.notif_stock_cero !== false) {
-            // Recolectar ingredientes afectados por esta venta
-            const ingNotificados = new Set();
-            for (const { product } of resolvedItems) {
-                const recetaItems = await ProductRecipe.findAll({ where: { product_id: product.id } });
-                for (const ri of recetaItems) {
-                    if (ri.item_type === 'ingredient' && !ingNotificados.has(ri.item_id)) {
-                        const ing = await Ingredient.findByPk(ri.item_id, { attributes: ['id', 'name', 'stock', 'min_stock', 'branch_stocks', 'business_id'] });
-                        if (!ing) continue;
-                        const branchId = branch_id || null;
-                        const stockActual = await getBranchStock(ing, branchId);
-                        const minStock = parseFloat(ing.min_stock) || 0;
-                        if (stockActual <= minStock && minStock > 0) {
-                            ingNotificados.add(ri.item_id);
-                            enviarNotificacion(
-                                biz,
-                                null,
-                                '⚠️ Insumo con stock bajo',
-                                `"${ing.name}" tiene ${stockActual.toFixed(1)} (mínimo: ${minStock})`
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        // Push notification: venta grande (si supera umbral configurado)
-        const umbralVenta = parseFloat(prefs.notif_venta_grande_umbral ?? 500);
-        if (prefs.notif_venta_grande !== false && finalTotal >= umbralVenta) {
-            enviarNotificacion(
-                biz,
-                null,
-                '💰 Venta grande registrada',
-                `$${finalTotal.toFixed(2)} · ${resolvedItems.length} producto(s) · ${payment_method || 'efectivo'}`
-            );
-        }
-
+        // Responder de inmediato: la venta ya está confirmada en la BD.
+        // Las notificaciones push (stock bajo / venta grande) hacían varias
+        // consultas secuenciales ANTES de responder, retrasando el cierre del
+        // modal de venta en el POS. Ahora corren en segundo plano.
         res.status(201).json(fullOrder);
+
+        procesarNotificacionesVenta(biz, resolvedItems, branch_id || null, finalTotal, payment_method)
+            .catch(err => logger.error('Notificaciones post-venta:', err));
     } catch (error) {
         await t.rollback();
         logger.error('Create order error:', error);
