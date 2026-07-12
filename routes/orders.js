@@ -254,6 +254,22 @@ async function procesarNotificacionesVenta(biz, resolvedItems, branchId, finalTo
     }
 }
 
+// Carga un pedido con sus relaciones para la respuesta del POS (mismo shape
+// para la creación normal y para las respuestas idempotentes).
+function cargarPedidoCompleto(orderId) {
+    return Order.findByPk(orderId, {
+        include: [
+            { model: Customer, as: 'customer', attributes: ['id', 'name', 'phone'] },
+            {
+                model: OrderItem,
+                as: 'items',
+                include: [{ model: Product, as: 'product', attributes: ['id', 'name', 'emoji', 'image'] }]
+            },
+            { model: User, as: 'creator', attributes: ['id', 'name'], required: false }
+        ]
+    });
+}
+
 // GET /api/orders
 router.get('/', authenticate, async (req, res) => {
     try {
@@ -383,8 +399,23 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
             table_id, guests, discount_amount, discount_id,
             employee_id: disc_employee_id, pin: disc_pin,
             loyalty_points_used, loyalty_points_earned,
-            skip_stock_check,
+            skip_stock_check, client_uuid,
         } = req.body;
+
+        // Idempotencia: si ya existe un pedido con este client_uuid en el negocio,
+        // devolverlo sin reprocesar. Protege contra reintentos (timeout de red tras
+        // haber creado el pedido) que de otro modo duplicarían la venta y el descuento
+        // de stock. La unicidad se refuerza además con el índice parcial en la BD.
+        if (client_uuid) {
+            const existente = await Order.findOne({
+                where: { client_uuid, business_id: biz },
+                transaction: t,
+            });
+            if (existente) {
+                await t.rollback();
+                return res.status(200).json(await cargarPedidoCompleto(existente.id));
+            }
+        }
 
         // Permitir pedido vacío cuando viene con table_id (mesa reservada, los items se agregan después)
         if ((!items || items.length === 0) && !table_id) {
@@ -501,6 +532,7 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
             table_id: table_id || null,
             guests: guests ? parseInt(guests) : null,
             created_by: req.user.id,
+            client_uuid: client_uuid || null,
         }, { transaction: t });
 
         for (const { product, qty, unitPrice, subtotal, notes: itemNotes } of resolvedItems) {
@@ -541,17 +573,7 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
         notificarOrders(biz);
         notificarInventario(biz);
 
-        const fullOrder = await Order.findByPk(order.id, {
-            include: [
-                { model: Customer, as: 'customer', attributes: ['id', 'name', 'phone'] },
-                {
-                    model: OrderItem,
-                    as: 'items',
-                    include: [{ model: Product, as: 'product', attributes: ['id', 'name', 'emoji', 'image'] }]
-                },
-                { model: User, as: 'creator', attributes: ['id', 'name'], required: false }
-            ]
-        });
+        const fullOrder = await cargarPedidoCompleto(order.id);
 
         // Responder de inmediato: la venta ya está confirmada en la BD.
         // Las notificaciones push (stock bajo / venta grande) hacían varias
@@ -563,6 +585,18 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
             .catch(err => logger.error('Notificaciones post-venta:', err));
     } catch (error) {
         await t.rollback();
+        // Carrera: dos reintentos concurrentes con el mismo client_uuid. El índice
+        // único hace fallar al segundo; en vez de 500, devolver el pedido ya creado.
+        if (error.name === 'SequelizeUniqueConstraintError' && req.body.client_uuid) {
+            try {
+                const yaCreado = await Order.findOne({
+                    where: { client_uuid: req.body.client_uuid, business_id: req.user.business_id },
+                });
+                if (yaCreado) return res.status(200).json(await cargarPedidoCompleto(yaCreado.id));
+            } catch (e2) {
+                logger.error('Error resolviendo carrera de client_uuid:', e2);
+            }
+        }
         logger.error('Create order error:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }

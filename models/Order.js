@@ -76,6 +76,12 @@ const Order = sequelize.define('Order', {
             model: 'users',
             key: 'id'
         }
+    },
+    // Idempotencia: uuid generado por el cliente para deduplicar reintentos.
+    // La unicidad se garantiza con un índice parcial (ver runMigrations / migración).
+    client_uuid: {
+        type: DataTypes.STRING(36),
+        allowNull: true
     }
 }, {
     tableName: 'orders',

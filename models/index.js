@@ -150,6 +150,22 @@ const setupRelations = () => {
 // Ver carpeta /migrations/ para el historial de cambios.
 const runMigrations = async () => {
     console.log('✅ Migrations managed by sequelize-cli');
+
+    // Garantías idempotentes en el arranque (Postgres). En producción Render
+    // ejecuta `node server.js` directamente, por lo que `sequelize-cli db:migrate`
+    // (definido en el script npm start) puede NO correr. Estas sentencias
+    // aseguran que las columnas/índices críticos existan sin depender del CLI.
+    // Solo Postgres: en tests (SQLite) las columnas las crea sequelize.sync().
+    if (sequelize.getDialect() === 'postgres') {
+        try {
+            await sequelize.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS client_uuid VARCHAR(36)');
+            await sequelize.query(
+                'CREATE UNIQUE INDEX IF NOT EXISTS orders_client_uuid_uq ON orders (client_uuid) WHERE client_uuid IS NOT NULL'
+            );
+        } catch (err) {
+            console.error('❌ Error asegurando orders.client_uuid:', err.message);
+        }
+    }
 };
 
 // Sincronizar base de datos

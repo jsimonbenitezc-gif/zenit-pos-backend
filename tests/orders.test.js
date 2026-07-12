@@ -60,6 +60,33 @@ describe('Orders — flujos críticos', () => {
         expect(res.body.items[0].quantity).toBe(2);
     });
 
+    test('Idempotencia: mismo client_uuid no duplica el pedido', async () => {
+        const client_uuid = 'test-uuid-0001-idempotente';
+        const payload = {
+            items: [{ product_id: product.id, quantity: 2 }],
+            payment_method: 'efectivo',
+            client_uuid,
+        };
+
+        const primera = await request(app)
+            .post('/api/orders')
+            .set('Authorization', `Bearer ${ownerToken}`)
+            .send(payload);
+        expect(primera.status).toBe(201);
+
+        // Reintento con el mismo uuid → debe devolver el MISMO pedido, no crear otro
+        const segunda = await request(app)
+            .post('/api/orders')
+            .set('Authorization', `Bearer ${ownerToken}`)
+            .send(payload);
+        expect(segunda.status).toBe(200);
+        expect(segunda.body.id).toBe(primera.body.id);
+
+        // Solo debe existir un pedido con ese client_uuid
+        const cuantos = await models.Order.count({ where: { client_uuid } });
+        expect(cuantos).toBe(1);
+    });
+
     test('Crear pedido con precio inválido (0) → 400', async () => {
         const res = await request(app)
             .post('/api/orders')
