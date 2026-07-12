@@ -165,6 +165,19 @@ const runMigrations = async () => {
         } catch (err) {
             console.error('❌ Error asegurando orders.client_uuid:', err.message);
         }
+
+        // products.image y categories.image deben ser TEXT para guardar data URIs
+        // base64 (~15-40KB). Sin esto quedan en VARCHAR(255) y el INSERT falla con
+        // "value too long", perdiendo la foto. La migración CLI equivalente
+        // (20260709000000) no corre en Render (arranca con `node server.js`), así
+        // que la garantizamos aquí. Idempotente: ALTER ... TYPE TEXT se re-ejecuta sin daño.
+        for (const tabla of ['products', 'categories']) {
+            try {
+                await sequelize.query(`ALTER TABLE ${tabla} ALTER COLUMN image TYPE TEXT`);
+            } catch (err) {
+                console.error(`❌ Error asegurando ${tabla}.image TEXT:`, err.message);
+            }
+        }
     }
 };
 

@@ -5,6 +5,7 @@ const { authenticate, isOwner } = require('../middleware/auth');
 const rateLimit = require('express-rate-limit');
 const { Op } = require('sequelize');
 const { paginate, paginatedResponse } = require('../utils/pagination');
+const logger = require('../utils/logger');
 
 // Protección: máximo 30 productos por minuto por IP
 const createProductLimiter = rateLimit({
@@ -153,6 +154,7 @@ router.post('/', createProductLimiter, authenticate, isOwner, async (req, res) =
         });
         res.status(201).json(product);
     } catch (error) {
+        logger.error('Error creando producto:', { message: error.message, name: error.name });
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
@@ -185,6 +187,7 @@ router.put('/:id', authenticate, isOwner, async (req, res) => {
         });
         res.json(product);
     } catch (error) {
+        logger.error('Error actualizando producto:', { message: error.message, name: error.name });
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
