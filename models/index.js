@@ -166,6 +166,22 @@ const runMigrations = async () => {
             console.error('❌ Error asegurando orders.client_uuid:', err.message);
         }
 
+        // Verificación de correo (política suave). Se agrega con DEFAULT true para
+        // "adoptar" a las cuentas ya existentes como verificadas (registradas antes
+        // de esta feature — no queremos molestarlas con el aviso). Los registros
+        // NUEVOS pasan por Sequelize, que fija email_verified=false explícitamente
+        // (defaultValue del modelo), así que el DEFAULT true solo afecta el backfill.
+        try {
+            await sequelize.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN DEFAULT true');
+            await sequelize.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_token VARCHAR(255)');
+            await sequelize.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_sent_at TIMESTAMP');
+            // Recuperación de contraseña
+            await sequelize.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_token VARCHAR(255)');
+            await sequelize.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_token_expires TIMESTAMP');
+        } catch (err) {
+            console.error('❌ Error asegurando columnas de verificación de correo:', err.message);
+        }
+
         // products.image y categories.image deben ser TEXT para guardar data URIs
         // base64 (~15-40KB). Sin esto quedan en VARCHAR(255) y el INSERT falla con
         // "value too long", perdiendo la foto. La migración CLI equivalente
