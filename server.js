@@ -35,6 +35,12 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
     .map(o => o.trim())
     .filter(Boolean);
 
+// El propio backend sirve páginas HTML (reset-password, billing, kds) que hacen
+// fetch al mismo dominio. El navegador manda Origin = origen del backend, así que
+// hay que permitir su PROPIO origen o CORS lo rechaza con 500. Se deriva de APP_URL.
+const selfOrigin = (process.env.APP_URL || 'https://zenit-pos-backend.onrender.com').replace(/\/+$/, '');
+if (selfOrigin && !allowedOrigins.includes(selfOrigin)) allowedOrigins.push(selfOrigin);
+
 app.use(cors({
     origin: (origin, callback) => {
         // Permitir requests sin origen (apps de escritorio, mobile, Postman, etc.)
