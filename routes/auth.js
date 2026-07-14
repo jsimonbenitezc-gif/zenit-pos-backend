@@ -520,7 +520,7 @@ button:disabled{opacity:.6;cursor:default;}
           document.querySelector('.card').innerHTML =
             '<h1 style="color:#16a34a">¡Listo!</h1><p class="sub">Tu contraseña se actualizó. Ya puedes iniciar sesión en Zenit POS con tu nueva contraseña.</p>';
         } else {
-          msg.className='msg err'; msg.textContent = (res.d && res.d.error) || 'No se pudo cambiar la contraseña.';
+          msg.className='msg err'; msg.textContent = ((res.d && res.d.error) || 'No se pudo cambiar la contraseña.') + ((res.d && res.d._debug) ? (' [' + res.d._debug + ']') : '');
           btn.disabled=false; btn.textContent='Guardar contraseña';
         }
       })
@@ -534,6 +534,8 @@ button:disabled{opacity:.6;cursor:default;}
 // Valida el token antes de mostrar el formulario (mejor UX).
 router.get('/reset-password', async (req, res) => {
     try {
+        // Nunca cachear esta página: siempre servir la versión actual del formulario.
+        res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
         const { token } = req.query;
         if (!token) {
             return res.status(400).send(paginaResultado('Enlace inválido',
@@ -585,14 +587,17 @@ router.post('/reset-password', async (req, res) => {
 
         return res.json({ message: 'Contraseña actualizada. Inicia sesión con tu nueva contraseña.' });
     } catch (error) {
-        // Log estructurado (visible en los logs de Render) para diagnosticar si reaparece.
+        // DEBUG TEMPORAL: detalle del error para diagnosticar el 500 del cliente.
         logger.error('Reset password (POST) error:', {
             name: error && error.name,
             message: error && error.message,
             parent: error && error.parent && error.parent.message,
             code: error && error.parent && error.parent.code,
         });
-        return res.status(500).json({ error: 'Error interno del servidor' });
+        return res.status(500).json({
+            error: 'Error interno del servidor',
+            _debug: (error && error.parent && error.parent.message) || (error && error.message) || (error && error.name) || 'desconocido',
+        });
     }
 });
 
