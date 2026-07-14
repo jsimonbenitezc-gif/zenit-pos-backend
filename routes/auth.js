@@ -520,7 +520,7 @@ button:disabled{opacity:.6;cursor:default;}
           document.querySelector('.card').innerHTML =
             '<h1 style="color:#16a34a">¡Listo!</h1><p class="sub">Tu contraseña se actualizó. Ya puedes iniciar sesión en Zenit POS con tu nueva contraseña.</p>';
         } else {
-          msg.className='msg err'; msg.textContent = ((res.d && res.d.error) || 'No se pudo cambiar la contraseña.') + ((res.d && res.d._debug) ? (' [' + res.d._debug + ']') : '');
+          msg.className='msg err'; msg.textContent = (res.d && res.d.error) || 'No se pudo cambiar la contraseña.';
           btn.disabled=false; btn.textContent='Guardar contraseña';
         }
       })
@@ -585,19 +585,14 @@ router.post('/reset-password', async (req, res) => {
 
         return res.json({ message: 'Contraseña actualizada. Inicia sesión con tu nueva contraseña.' });
     } catch (error) {
-        // DEBUG TEMPORAL (2026-07-13): detalle del error para diagnosticar el 500 en id=4.
-        // Revertir a un 500 genérico una vez identificada la causa.
+        // Log estructurado (visible en los logs de Render) para diagnosticar si reaparece.
         logger.error('Reset password (POST) error:', {
             name: error && error.name,
             message: error && error.message,
             parent: error && error.parent && error.parent.message,
             code: error && error.parent && error.parent.code,
-            sql: error && error.sql,
         });
-        return res.status(500).json({
-            error: 'Error interno del servidor',
-            _debug: (error && error.parent && error.parent.message) || (error && error.message) || (error && error.name) || 'desconocido',
-        });
+        return res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
