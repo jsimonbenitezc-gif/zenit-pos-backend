@@ -398,7 +398,7 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
             delivery_address, maps_link, notes, branch_id,
             table_id, guests, discount_amount, discount_id,
             employee_id: disc_employee_id, pin: disc_pin,
-            loyalty_points_used, loyalty_points_earned,
+            loyalty_points_used, loyalty_points_earned, loyalty_discount_amount,
             skip_stock_check, client_uuid,
         } = req.body;
 
@@ -446,6 +446,13 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
             }
         }
 
+        // Autorización de descuentos (seguridad de dinero):
+        //  - descuentoAutorizadoPorId: el descuento corresponde a un Discount configurado
+        //    del negocio (autorización implícita del dueño al crearlo).
+        //  - descuentoEmpleado: empleado que autorizó vía PIN (si aplica), para auditoría.
+        let descuentoAutorizadoPorId = false;
+        let descuentoEmpleado = null;
+
         // Si viene discount_id, verificar que el descuento existe y si requiere PIN
         if (discount_id) {
             const discount = await Discount.findOne({
@@ -456,13 +463,14 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
                 await t.rollback();
                 return res.status(404).json({ error: 'Descuento no encontrado' });
             }
+            descuentoAutorizadoPorId = true;
             if (discount.requires_pin) {
                 if (!disc_employee_id || !disc_pin) {
                     await t.rollback();
                     return res.status(403).json({ error: 'Este descuento requiere autorización con PIN' });
                 }
                 try {
-                    await verifyEmployeePin(disc_employee_id, disc_pin, biz);
+                    descuentoEmpleado = await verifyEmployeePin(disc_employee_id, disc_pin, biz);
                 } catch (pinErr) {
                     await t.rollback();
                     return res.status(403).json({ error: pinErr.message });
@@ -513,13 +521,55 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
         }
 
         const discountAmt = parseFloat(Math.min(Math.max(parseFloat(discount_amount) || 0, 0), calculatedTotal).toFixed(2));
-        const finalTotal = parseFloat((calculatedTotal - discountAmt).toFixed(2));
+
+        // Seguridad de dinero: un descuento manual (sin un Discount configurado del
+        // negocio) debe autorizarse con PIN de empleado. Sin esto, cualquier cajero
+        // podía mandar discount_amount arbitrario (hasta venta gratis) sin rastro.
+        if (discountAmt > 0 && !descuentoAutorizadoPorId) {
+            if (!disc_employee_id || !disc_pin) {
+                await t.rollback();
+                return res.status(403).json({ error: 'Aplicar un descuento requiere autorización con PIN' });
+            }
+            try {
+                descuentoEmpleado = await verifyEmployeePin(disc_employee_id, disc_pin, biz);
+            } catch (pinErr) {
+                await t.rollback();
+                return res.status(403).json({ error: pinErr.message });
+            }
+        }
+
+        // Canje de puntos de fidelidad: NO es un descuento del empleado (el cliente
+        // gasta puntos que ya ganó), así que no exige PIN. Pero tampoco se confía en
+        // el monto que manda el cliente: se topa a `puntos canjeados × puntos_valor`
+        // (valor configurado por el dueño), para que nadie pueda regalar dinero
+        // declarando un canje inflado.
+        let loyaltyAmt = 0;
+        const puntosCanjeados = Math.max(parseInt(loyalty_points_used) || 0, 0);
+        if (parseFloat(loyalty_discount_amount) > 0) {
+            if (puntosCanjeados <= 0) {
+                await t.rollback();
+                return res.status(400).json({ error: 'El descuento por puntos requiere indicar los puntos canjeados' });
+            }
+            const prefsNegocio = await getPrefs(biz);
+            const valorPunto = parseFloat(prefsNegocio.puntos_valor ?? 0.10) || 0;
+            const topePorPuntos = parseFloat((puntosCanjeados * valorPunto).toFixed(2));
+            loyaltyAmt = Math.min(
+                parseFloat(loyalty_discount_amount) || 0,
+                topePorPuntos,
+                parseFloat((calculatedTotal - discountAmt).toFixed(2))
+            );
+            loyaltyAmt = parseFloat(Math.max(loyaltyAmt, 0).toFixed(2));
+        }
+
+        const finalTotal = parseFloat((calculatedTotal - discountAmt - loyaltyAmt).toFixed(2));
 
         const order = await Order.create({
             customer_id,
             customer_temp_info,
             total: finalTotal,
-            discount_amount: discountAmt,
+            // Descuento total aplicado a la venta (empleado/promo + canje de puntos),
+            // para que tickets y reportes muestren lo que realmente se descontó.
+            discount_amount: parseFloat((discountAmt + loyaltyAmt).toFixed(2)),
             status: 'registrado',
             payment_method: payment_method || 'efectivo',
             order_type: order_type || 'comer',
@@ -569,9 +619,32 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
             }
         }
 
+        // Auditar SIEMPRE que se aplique un descuento (quién, monto, pedido).
+        if (discountAmt > 0) {
+            // Identidad de quien aplicó el descuento: el empleado del PIN si lo hubo;
+            // si no (descuento configurado sin PIN), el usuario autenticado.
+            let actorId = descuentoEmpleado?.id || req.user.id;
+            let actorNombre = descuentoEmpleado?.name;
+            if (!actorNombre) {
+                const actor = await User.findByPk(req.user.id, { attributes: ['id', 'name'], transaction: t });
+                actorNombre = actor?.name || 'Sin identificar';
+            }
+            await PrivilegedActionLog.create({
+                business_id: biz,
+                branch_id: branch_id || null,
+                employee_id: actorId,
+                employee_name: actorNombre,
+                action_type: 'apply_discount',
+                target_description: `Pedido #${order.id}`,
+                before_data: JSON.stringify({ subtotal: calculatedTotal }),
+                after_data: JSON.stringify({ discount_amount: discountAmt, total: finalTotal, discount_id: discount_id || null })
+            }, { transaction: t });
+        }
+
         await t.commit();
         notificarOrders(biz);
         notificarInventario(biz);
+        if (discountAmt > 0) notificarAudit(biz);
 
         const fullOrder = await cargarPedidoCompleto(order.id);
 
@@ -728,37 +801,59 @@ router.delete('/:id/items/:itemId', authenticate, async (req, res) => {
 });
 
 // PUT /api/orders/:id/status
-// Si status='cancelado', body puede incluir { employee_id, pin } para registrar en auditoría
+// Ruta canónica de CANCELACIÓN. Si status='cancelado' exige { employee_id, pin },
+// registra en auditoría y restaura los insumos (solo si el pedido estaba en
+// 'registrado', aún sin elaborar). Un pedido ya elaborado (completado/entregado)
+// no se cancela: se usa la devolución (POST /:id/devolucion).
 router.put('/:id/status', authenticate, async (req, res) => {
+    const t = await sequelize.transaction();
     try {
         const biz = req.user.business_id;
         const { status, employee_id, pin, employee_name } = req.body;
 
         if (!['registrado', 'completado', 'entregado', 'cancelado'].includes(status)) {
+            await t.rollback();
             return res.status(400).json({ error: 'Estado inválido. Use: registrado, completado, entregado o cancelado' });
         }
 
-        const order = await Order.findOne({ where: { id: req.params.id, business_id: biz } });
+        const order = await Order.findOne({
+            where: { id: req.params.id, business_id: biz },
+            include: [{ model: OrderItem, as: 'items' }],
+            transaction: t,
+            lock: t.LOCK.UPDATE
+        });
         if (!order) {
+            await t.rollback();
             return res.status(404).json({ error: 'Pedido no encontrado' });
         }
 
-        // Si se está cancelando: requiere PIN obligatorio
+        // Si se está cancelando: requiere PIN obligatorio y solo desde 'registrado'
         let authorizedEmployee = null;
+        const beforeStatus = order.status;
         if (status === 'cancelado') {
+            if (order.status !== 'registrado') {
+                await t.rollback();
+                return res.status(400).json({ error: 'Este pedido ya fue procesado. Usa "devolución" en lugar de cancelar.' });
+            }
             if (!employee_id || !pin) {
+                await t.rollback();
                 return res.status(400).json({ error: 'Se requiere PIN para esta acción' });
             }
             try {
                 authorizedEmployee = await verifyEmployeePin(employee_id, pin, biz);
             } catch (pinErr) {
+                await t.rollback();
                 return res.status(403).json({ error: pinErr.message });
+            }
+
+            // Restaurar insumos: el pedido estaba en 'registrado' (no elaborado).
+            for (const item of order.items) {
+                const qty = Math.max(1, parseInt(item.quantity) || 1);
+                await restaurarIngredientesDeReceta(item.product_id, qty, t, order.branch_id || null);
             }
         }
 
-        const beforeStatus = order.status;
-        await order.update({ status });
-        notificarOrders(biz);
+        await order.update({ status }, { transaction: t });
 
         if (authorizedEmployee && status === 'cancelado') {
             await PrivilegedActionLog.create({
@@ -770,12 +865,16 @@ router.put('/:id/status', authenticate, async (req, res) => {
                 target_description: `Pedido #${order.id}`,
                 before_data: JSON.stringify({ id: order.id, status: beforeStatus, total: order.total }),
                 after_data: JSON.stringify({ id: order.id, status: 'cancelado', total: order.total })
-            });
-            notificarAudit(biz);
+            }, { transaction: t });
         }
 
-        // Push notification: pedido cancelado
+        await t.commit();
+        notificarOrders(biz);
+
         if (status === 'cancelado') {
+            notificarInventario(biz);
+            if (authorizedEmployee) notificarAudit(biz);
+            // Push notification: pedido cancelado
             const empNombre = authorizedEmployee ? (employee_name || authorizedEmployee.name) : 'Sin identificar';
             enviarNotificacion(
                 biz,
@@ -787,6 +886,8 @@ router.put('/:id/status', authenticate, async (req, res) => {
 
         res.json(order);
     } catch (error) {
+        await t.rollback();
+        logger.error('Update order status error:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
@@ -800,17 +901,24 @@ router.put('/:id', authenticate, async (req, res) => {
             return res.status(404).json({ error: 'Pedido no encontrado' });
         }
         const { status, payment_method, order_type, reference, delivery_address, maps_link, notes } = req.body;
-        if (status !== undefined && !['registrado', 'completado', 'entregado', 'cancelado'].includes(status)) {
-            return res.status(400).json({ error: 'Estado inválido. Use: registrado, completado, entregado o cancelado' });
+
+        // Cancelar y devolver son acciones sensibles: exigen PIN y auditoría, así que
+        // NO se permiten desde este PUT genérico. Se enrutan a sus endpoints propios.
+        if (status === 'cancelado' || status === 'devuelto') {
+            return res.status(400).json({ error: 'Usa la ruta de cancelación/devolución (requiere PIN)' });
+        }
+        if (status !== undefined && !['registrado', 'completado', 'entregado'].includes(status)) {
+            return res.status(400).json({ error: 'Estado inválido. Use: registrado, completado o entregado' });
         }
 
         // Validar transiciones de estado permitidas
         if (status !== undefined && status !== order.status) {
             const transicionesValidas = {
-                registrado: ['completado', 'cancelado'],
-                completado: ['entregado', 'cancelado'],
+                registrado: ['completado'],
+                completado: ['entregado'],
                 entregado: [],
-                cancelado: []
+                cancelado: [],
+                devuelto: []
             };
             const permitidas = transicionesValidas[order.status] || [];
             if (!permitidas.includes(status)) {
@@ -858,9 +966,15 @@ router.delete('/:id', authenticate, async (req, res) => {
             return res.status(404).json({ error: 'Pedido no encontrado' });
         }
 
-        if (order.status === 'cancelado') {
+        // Solo se cancela un pedido en 'registrado' (aún no elaborado). Un pedido ya
+        // procesado se maneja con la devolución (POST /:id/devolucion). Misma regla que
+        // PUT /:id/status para que la cancelación sea consistente por cualquier ruta.
+        if (order.status !== 'registrado') {
             await t.rollback();
-            return res.status(400).json({ error: 'Este pedido ya está cancelado' });
+            const msg = order.status === 'cancelado'
+                ? 'Este pedido ya está cancelado'
+                : 'Este pedido ya fue procesado. Usa "devolución" en lugar de cancelar.';
+            return res.status(400).json({ error: msg });
         }
 
         // Capturar estado antes de la cancelación (para auditoría)
@@ -872,13 +986,10 @@ router.delete('/:id', authenticate, async (req, res) => {
             order_type: order.order_type
         };
 
-        // Restaurar ingredientes solo si el pedido estaba en "registrado"
-        // (aún no se preparó, así que los insumos no se consumieron realmente)
-        if (order.status === 'registrado') {
-            for (const item of order.items) {
-                const qty = Math.max(1, parseInt(item.quantity) || 1);
-                await restaurarIngredientesDeReceta(item.product_id, qty, t, order.branch_id || null);
-            }
+        // Restaurar ingredientes (el pedido estaba en 'registrado': insumos no consumidos)
+        for (const item of order.items) {
+            const qty = Math.max(1, parseInt(item.quantity) || 1);
+            await restaurarIngredientesDeReceta(item.product_id, qty, t, order.branch_id || null);
         }
 
         await order.update({ status: 'cancelado' }, { transaction: t });
@@ -912,6 +1023,79 @@ router.delete('/:id', authenticate, async (req, res) => {
         res.json({ message: 'Pedido cancelado correctamente' });
     } catch (error) {
         await t.rollback();
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// POST /api/orders/:id/devolucion — devolver un pedido YA elaborado
+// Para pedidos en 'completado' o 'entregado' no se puede cancelar (los insumos ya se
+// consumieron). Exige PIN, NO restaura stock, marca 'devuelto' y audita (motivo opcional).
+router.post('/:id/devolucion', authenticate, async (req, res) => {
+    const t = await sequelize.transaction();
+    try {
+        const biz = req.user.business_id;
+        const { employee_id, pin, employee_name, motivo } = req.body || {};
+
+        // PIN obligatorio
+        if (!employee_id || !pin) {
+            await t.rollback();
+            return res.status(400).json({ error: 'Se requiere PIN para esta acción' });
+        }
+        let authorizedEmployee;
+        try {
+            authorizedEmployee = await verifyEmployeePin(employee_id, pin, biz);
+        } catch (pinErr) {
+            await t.rollback();
+            return res.status(403).json({ error: pinErr.message });
+        }
+
+        const order = await Order.findOne({
+            where: { id: req.params.id, business_id: biz },
+            transaction: t,
+            lock: t.LOCK.UPDATE
+        });
+        if (!order) {
+            await t.rollback();
+            return res.status(404).json({ error: 'Pedido no encontrado' });
+        }
+
+        // Solo pedidos ya elaborados: completado | entregado → devuelto
+        if (!['completado', 'entregado'].includes(order.status)) {
+            await t.rollback();
+            return res.status(400).json({ error: 'Solo se puede devolver un pedido completado o entregado' });
+        }
+
+        const beforeStatus = order.status;
+        await order.update({ status: 'devuelto' }, { transaction: t });
+
+        await PrivilegedActionLog.create({
+            business_id: biz,
+            branch_id: order.branch_id || null,
+            employee_id: authorizedEmployee.id,
+            employee_name: employee_name || authorizedEmployee.name,
+            action_type: 'return_order',
+            target_description: `Pedido #${order.id}`,
+            before_data: JSON.stringify({ id: order.id, status: beforeStatus, total: order.total }),
+            after_data: JSON.stringify({ id: order.id, status: 'devuelto', total: order.total, motivo: motivo || null })
+        }, { transaction: t });
+
+        await t.commit();
+        notificarOrders(biz);
+        notificarAudit(biz);
+
+        // Push notification: pedido devuelto
+        const empNombre = employee_name || authorizedEmployee.name;
+        enviarNotificacion(
+            biz,
+            'notif_pedido_devuelto',
+            '↩️ Pedido devuelto',
+            `Pedido #${order.id} ($${parseFloat(order.total).toFixed(2)}) · devuelto por ${empNombre}`
+        );
+
+        res.json(order);
+    } catch (error) {
+        await t.rollback();
+        logger.error('Return order error:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });

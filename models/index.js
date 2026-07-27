@@ -166,6 +166,16 @@ const runMigrations = async () => {
             console.error('❌ Error asegurando orders.client_uuid:', err.message);
         }
 
+        // Estado 'devuelto' (devolución de pedidos ya elaborados). El ENUM de Sequelize
+        // se llama enum_<tabla>_<columna>. ADD VALUE IF NOT EXISTS es idempotente y no
+        // corre dentro de una transacción (sequelize.query en autocommit), así que es
+        // seguro en el arranque (ver CLAUDE.md §19.4: Render arranca con node server.js).
+        try {
+            await sequelize.query("ALTER TYPE \"enum_orders_status\" ADD VALUE IF NOT EXISTS 'devuelto'");
+        } catch (err) {
+            console.error('❌ Error asegurando estado orders.status=devuelto:', err.message);
+        }
+
         // Verificación de correo (política suave). Se agrega con DEFAULT true para
         // "adoptar" a las cuentas ya existentes como verificadas (registradas antes
         // de esta feature — no queremos molestarlas con el aviso). Los registros

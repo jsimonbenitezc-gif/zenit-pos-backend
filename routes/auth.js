@@ -8,6 +8,7 @@ const { User, sequelize } = require('../models');
 const { authenticate } = require('../middleware/auth');
 const { enviarNotificacion } = require('../utils/push');
 const { enviarCorreoVerificacion, enviarCorreoReset } = require('../utils/email');
+const { normalizarZona } = require('../utils/tz');
 
 // Vigencia del token de verificación de correo
 const VERIFICATION_TTL_MS = 24 * 60 * 60 * 1000; // 24 horas
@@ -127,7 +128,7 @@ router.post('/login', loginLimiter, async (req, res) => {
 // POST /api/auth/register
 router.post('/register', registerLimiter, async (req, res) => {
     try {
-        const { name, email, password } = req.body;
+        const { name, email, password, tz } = req.body;
 
         if (!name || !email || !password) {
             return res.status(400).json({ error: 'Nombre, email y contraseña son requeridos' });
@@ -150,6 +151,11 @@ router.post('/register', registerLimiter, async (req, res) => {
         // Token de verificación de correo (política suave: NO bloquea el uso de la app)
         const verificationToken = generarTokenVerificacion();
 
+        // Zona horaria del dispositivo que registra la cuenta. Es el mejor dato que
+        // tenemos del negocio y evita que el dueño tenga que configurarla; si el cliente
+        // no la manda (builds viejos) se usa la default y se puede corregir en Ajustes.
+        const zonaNegocio = normalizarZona(tz);
+
         const user = await User.create({
             username: email,
             password,
@@ -158,6 +164,7 @@ router.post('/register', registerLimiter, async (req, res) => {
             email_verified: false,
             verification_token: verificationToken,
             verification_sent_at: new Date(),
+            settings: JSON.stringify({ tz: zonaNegocio }),
         });
 
         // Enviar el correo de confirmación en segundo plano (no bloqueamos la

@@ -25,6 +25,9 @@ app.use('/api/orders',     require('../routes/orders'));
 app.use('/api/customers',  require('../routes/customers'));
 app.use('/api/inventory',  require('../routes/inventory'));
 app.use('/api/staff',      require('../routes/staff'));
+app.use('/api/stats',      require('../routes/stats'));
+app.use('/api/settings',   require('../routes/settings'));
+app.use('/api/turnos',     require('../routes/turnos'));
 
 // ── Inicializar DB de test ───────────────────────────────
 let relationsReady = false;

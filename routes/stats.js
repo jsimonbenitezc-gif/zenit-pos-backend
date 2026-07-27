@@ -4,6 +4,32 @@ const logger = require('../utils/logger');
 const { Order, OrderItem, Product, Customer, Ingredient, BranchStock, sequelize } = require('../models');
 const { authenticate } = require('../middleware/auth');
 const { Op } = require('sequelize');
+const { filtroVentaContable } = require('../utils/ordersFilter');
+const {
+    zonaDelNegocio, inicioDiaLocal, inicioDiaLocalISO,
+    sqlFechaLocal, sqlHoraLocal, sqlMesLocal
+} = require('../utils/tz');
+
+/**
+ * Traduce los filtros `date_from`/`date_to` a un rango de instantes según la zona del
+ * negocio. Una fecha suelta ('2026-07-24') significa el DÍA LOCAL completo: desde su
+ * medianoche local hasta (exclusivo) la medianoche del día siguiente. Antes se parseaba
+ * como UTC, así que el rango quedaba corrido varias horas.
+ * Si el texto trae hora (ISO completo) se respeta tal cual.
+ */
+function rangoFechas(tz, date_from, date_to) {
+    if (!date_from && !date_to) return {};
+    const createdAt = {};
+    if (date_from) {
+        createdAt[Op.gte] = inicioDiaLocalISO(tz, date_from) || new Date(date_from);
+    }
+    if (date_to) {
+        const finExclusivo = inicioDiaLocalISO(tz, date_to, 1);
+        if (finExclusivo) createdAt[Op.lt] = finExclusivo;
+        else createdAt[Op.lte] = new Date(date_to);
+    }
+    return { createdAt };
+}
 
 // GET /api/stats/dashboard - Estadísticas completas del dashboard
 router.get('/dashboard', authenticate, async (req, res) => {
@@ -12,23 +38,25 @@ router.get('/dashboard', authenticate, async (req, res) => {
         // Filtro opcional por sucursal. Sin branch_id = ver todas (tab "Todas")
         const branchFilter = req.query.branch_id ? { branch_id: parseInt(req.query.branch_id) } : {};
 
-        const hoy = new Date();
-        hoy.setHours(0, 0, 0, 0);
+        // Los cortes de día usan la zona horaria del NEGOCIO, no la del servidor
+        // (Render corre en UTC: sin esto el día cortaba a las 6pm en México).
+        const tz = await zonaDelNegocio(biz);
+        const ahora = new Date();
+        const hoy = inicioDiaLocal(tz, ahora);
+        const ayer = inicioDiaLocal(tz, ahora, -1);
+        const hace7Dias = inicioDiaLocal(tz, ahora, -6);
 
-        const ayer = new Date(hoy);
-        ayer.setDate(ayer.getDate() - 1);
-
-        const hace7Dias = new Date(hoy);
-        hace7Dias.setDate(hace7Dias.getDate() - 6);
-
-        const primerDiaMes = new Date(hoy.getFullYear(), hoy.getMonth(), 1);
+        // Expresiones SQL para agrupar por fecha/hora LOCAL del negocio
+        const exprFechaLocal = sqlFechaLocal(sequelize, '"createdAt"', tz);
+        const exprHoraLocal = sqlHoraLocal(sequelize, '"createdAt"', tz);
 
         // 1. VENTAS DE HOY
         const ventasHoy = await Order.findAll({
             where: {
                 business_id: biz,
                 createdAt: { [Op.gte]: hoy },
-                ...branchFilter
+                ...branchFilter,
+                ...filtroVentaContable()
             },
             attributes: [
                 [sequelize.fn('COUNT', sequelize.col('id')), 'total_pedidos'],
@@ -46,7 +74,8 @@ router.get('/dashboard', authenticate, async (req, res) => {
                     [Op.gte]: ayer,
                     [Op.lt]: hoy
                 },
-                ...branchFilter
+                ...branchFilter,
+                ...filtroVentaContable()
             },
             attributes: [
                 [sequelize.fn('COUNT', sequelize.col('id')), 'total_pedidos'],
@@ -60,15 +89,16 @@ router.get('/dashboard', authenticate, async (req, res) => {
             where: {
                 business_id: biz,
                 createdAt: { [Op.gte]: hace7Dias },
-                ...branchFilter
+                ...branchFilter,
+                ...filtroVentaContable()
             },
             attributes: [
-                [sequelize.fn('DATE', sequelize.col('createdAt')), 'fecha'],
+                [sequelize.literal(exprFechaLocal), 'fecha'],
                 [sequelize.fn('COALESCE', sequelize.fn('SUM', sequelize.col('total')), 0), 'monto'],
                 [sequelize.fn('COUNT', sequelize.col('id')), 'pedidos']
             ],
-            group: [sequelize.fn('DATE', sequelize.col('createdAt'))],
-            order: [[sequelize.fn('DATE', sequelize.col('createdAt')), 'ASC']],
+            group: [sequelize.literal(exprFechaLocal)],
+            order: [sequelize.literal(`${exprFechaLocal} ASC`)],
             raw: true
         });
 
@@ -80,7 +110,8 @@ router.get('/dashboard', authenticate, async (req, res) => {
                 where: {
                     business_id: biz,
                     createdAt: { [Op.gte]: hoy },
-                    ...branchFilter
+                    ...branchFilter,
+                    ...filtroVentaContable()
                 },
                 attributes: []
             }],
@@ -145,7 +176,8 @@ router.get('/dashboard', authenticate, async (req, res) => {
                 business_id: biz,
                 createdAt: { [Op.gte]: hoy },
                 customer_id: { [Op.ne]: null },
-                ...branchFilter
+                ...branchFilter,
+                ...filtroVentaContable()
             },
             distinct: true,
             col: 'customer_id'
@@ -160,7 +192,8 @@ router.get('/dashboard', authenticate, async (req, res) => {
                     where: {
                         business_id: biz,
                         createdAt: { [Op.gte]: hace7Dias },
-                        ...branchFilter
+                        ...branchFilter,
+                        ...filtroVentaContable()
                     },
                     attributes: []
                 },
@@ -189,7 +222,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
 
         // 8. ÚLTIMAS 5 VENTAS
         const ultimasVentas = await Order.findAll({
-            where: { business_id: biz, ...branchFilter },
+            where: { business_id: biz, ...branchFilter, ...filtroVentaContable() },
             include: [{
                 model: Customer,
                 as: 'customer',
@@ -208,15 +241,20 @@ router.get('/dashboard', authenticate, async (req, res) => {
                 where: {
                     business_id: biz,
                     createdAt: { [Op.gte]: hoy },
-                    ...branchFilter
+                    ...branchFilter,
+                    ...filtroVentaContable()
                 },
                 attributes: []
             }],
             attributes: ['id', 'name', 'phone'],
+            // El conteo de "compras" para ser VIP también excluye canceladas/devueltas
+            // y mesas abiertas (mismo criterio de venta contable).
             where: sequelize.literal(`(
                 SELECT COUNT(*) FROM orders
                 WHERE orders.customer_id = "Customer"."id"
                 AND orders.business_id = $biz
+                AND orders.status NOT IN ('cancelado', 'devuelto')
+                AND NOT (orders.status = 'registrado' AND orders.table_id IS NOT NULL)
             ) >= 3`),
             bind: { biz }
         });
@@ -226,15 +264,16 @@ router.get('/dashboard', authenticate, async (req, res) => {
             where: {
                 business_id: biz,
                 createdAt: { [Op.gte]: hoy },
-                ...branchFilter
+                ...branchFilter,
+                ...filtroVentaContable()
             },
             attributes: [
-                [sequelize.fn('EXTRACT', sequelize.literal("HOUR FROM \"createdAt\"")), 'hora'],
+                [sequelize.literal(exprHoraLocal), 'hora'],
                 [sequelize.fn('COUNT', sequelize.col('id')), 'pedidos'],
                 [sequelize.fn('SUM', sequelize.col('total')), 'monto']
             ],
-            group: [sequelize.fn('EXTRACT', sequelize.literal("HOUR FROM \"createdAt\""))],
-            order: [[sequelize.fn('EXTRACT', sequelize.literal("HOUR FROM \"createdAt\"")), 'ASC']],
+            group: [sequelize.literal(exprHoraLocal)],
+            order: [sequelize.literal(`${exprHoraLocal} ASC`)],
             raw: true
         });
 
@@ -288,38 +327,33 @@ router.get('/sales', authenticate, async (req, res) => {
         const biz = req.user.business_id;
         const { date_from, date_to, group_by } = req.query;
 
-        const where = { business_id: biz };
-        if (date_from || date_to) {
-            where.createdAt = {};
-            if (date_from) where.createdAt[Op.gte] = new Date(date_from);
-            if (date_to) where.createdAt[Op.lte] = new Date(date_to);
-        }
+        const tz = await zonaDelNegocio(biz);
+        const where = { business_id: biz, ...filtroVentaContable() };
+        Object.assign(where, rangoFechas(tz, date_from, date_to));
 
         let groupField;
         switch (group_by) {
             case 'hour':
-                groupField = sequelize.fn('EXTRACT', sequelize.literal("HOUR FROM \"createdAt\""));
-                break;
-            case 'day':
-                groupField = sequelize.fn('DATE', sequelize.col('createdAt'));
+                groupField = sqlHoraLocal(sequelize, '"createdAt"', tz);
                 break;
             case 'month':
-                groupField = sequelize.fn('EXTRACT', sequelize.literal("MONTH FROM \"createdAt\""));
+                groupField = sqlMesLocal(sequelize, '"createdAt"', tz);
                 break;
+            case 'day':
             default:
-                groupField = sequelize.fn('DATE', sequelize.col('createdAt'));
+                groupField = sqlFechaLocal(sequelize, '"createdAt"', tz);
         }
 
         const sales = await Order.findAll({
             where,
             attributes: [
-                [groupField, 'periodo'],
+                [sequelize.literal(groupField), 'periodo'],
                 [sequelize.fn('COUNT', sequelize.col('id')), 'total_pedidos'],
                 [sequelize.fn('SUM', sequelize.col('total')), 'monto_total'],
                 [sequelize.fn('AVG', sequelize.col('total')), 'ticket_promedio']
             ],
-            group: [groupField],
-            order: [[groupField, 'ASC']],
+            group: [sequelize.literal(groupField)],
+            order: [sequelize.literal(`${groupField} ASC`)],
             raw: true
         });
 
@@ -335,12 +369,9 @@ router.get('/products', authenticate, async (req, res) => {
         const biz = req.user.business_id;
         const { date_from, date_to, limit } = req.query;
 
-        const orderWhere = { business_id: biz };
-        if (date_from || date_to) {
-            orderWhere.createdAt = {};
-            if (date_from) orderWhere.createdAt[Op.gte] = new Date(date_from);
-            if (date_to) orderWhere.createdAt[Op.lte] = new Date(date_to);
-        }
+        const tz = await zonaDelNegocio(biz);
+        const orderWhere = { business_id: biz, ...filtroVentaContable() };
+        Object.assign(orderWhere, rangoFechas(tz, date_from, date_to));
 
         const productStats = await OrderItem.findAll({
             include: [

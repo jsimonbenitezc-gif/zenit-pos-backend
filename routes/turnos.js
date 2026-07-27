@@ -4,6 +4,7 @@ const logger = require('../utils/logger');
 const { Op } = require('sequelize');
 const { Turno, Order, sequelize } = require('../models');
 const { authenticate } = require('../middleware/auth');
+const { filtroVentaContable } = require('../utils/ordersFilter');
 const { configurarSSE } = require('../utils/sse');
 const { enviarNotificacion, getPrefs } = require('../utils/push');
 
@@ -129,7 +130,7 @@ router.get('/:id/totales', authenticate, async (req, res) => {
         const pedidos = await Order.findAll({
             where: {
                 business_id: req.user.business_id,
-                status: 'completado',
+                ...filtroVentaContable(),
                 createdAt: { [Op.gte]: turno.apertura },
                 ...(turno.branch_id ? { branch_id: turno.branch_id } : {})
             },
@@ -179,7 +180,7 @@ router.put('/:id/cerrar', authenticate, async (req, res) => {
         const pedidos = await Order.findAll({
             where: {
                 business_id: req.user.business_id,
-                status: 'completado',
+                ...filtroVentaContable(),
                 createdAt: { [Op.between]: [turno.apertura, ahora] },
                 ...(turno.branch_id ? { branch_id: turno.branch_id } : {})
             },

@@ -7,6 +7,7 @@ const rateLimit = require('express-rate-limit');
 const { User } = require('../models');
 const { authenticate } = require('../middleware/auth');
 const { configurarSSE } = require('../utils/sse');
+const { zonaValida, invalidarZonaNegocio } = require('../utils/tz');
 
 // Protección: máximo 10 intentos de verificación de PIN por minuto por IP
 const pinLimiter = rateLimit({
@@ -65,6 +66,7 @@ router.put('/', authenticate, async (req, res) => {
             'puntos_activos', 'puntos_por_peso', 'puntos_bono_pedido', 'puntos_valor',
             'permisos_roles',
             'sucursal_id',
+            'tz',
             // Preferencias de notificaciones push
             'notif_turno_abierto', 'notif_turno_cerrado',
             'notif_diferencia_caja', 'notif_diferencia_caja_umbral',
@@ -83,8 +85,16 @@ router.put('/', authenticate, async (req, res) => {
         for (const key of ALLOWED_KEYS) {
             if (key in req.body) incoming[key] = req.body[key];
         }
+
+        // La zona horaria se interpola en SQL (stats agrupa por fecha local), así que
+        // se rechaza cualquier valor que no sea una zona IANA real.
+        if ('tz' in incoming && !zonaValida(incoming.tz)) {
+            return res.status(400).json({ error: 'Zona horaria inválida' });
+        }
+
         const updated = { ...current, ...incoming };
         await user.update({ settings: JSON.stringify(updated) });
+        if ('tz' in incoming) invalidarZonaNegocio(req.user.business_id);
         // Notificar a todos los dispositivos conectados del mismo negocio
         _notificarSettings(req.user.business_id);
         res.json(updated);

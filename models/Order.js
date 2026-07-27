@@ -20,7 +20,7 @@ const Order = sequelize.define('Order', {
         allowNull: false
     },
     status: {
-        type: DataTypes.ENUM('registrado', 'completado', 'entregado', 'cancelado'),
+        type: DataTypes.ENUM('registrado', 'completado', 'entregado', 'cancelado', 'devuelto'),
         defaultValue: 'registrado'
     },
     payment_method: {

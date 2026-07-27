@@ -208,6 +208,10 @@ syncDatabase().then(() => {
     app.listen(PORT, () => {
         logger.info(`Zenit POS API running on http://localhost:${PORT}`);
         logger.info(`Environment: ${process.env.NODE_ENV}`);
+        // Diagnóstico de zona horaria: en Render el offset es 0 (UTC). Los cortes de
+        // día NO dependen de esto — cada negocio usa su `settings.tz` (ver utils/tz.js).
+        const { ZONA_DEFAULT } = require('./utils/tz');
+        logger.info(`Zona del servidor: UTC${-new Date().getTimezoneOffset() / 60 >= 0 ? '+' : ''}${-new Date().getTimezoneOffset() / 60} · zona por defecto de negocios: ${ZONA_DEFAULT}`);
     });
     iniciarCronJobs();
 });
@@ -218,24 +222,28 @@ function iniciarCronJobs() {
     const { User, Turno, Order } = require('./models');
     const { enviarNotificacion } = require('./utils/push');
     const { Op } = require('sequelize');
+    const { filtroVentaContable } = require('./utils/ordersFilter');
+    const { normalizarZona, horaLocal, diaSemanaLocal, inicioDiaLocal } = require('./utils/tz');
 
     // Resumen diario — corre cada hora en el minuto 0
-    // Envía solo a los usuarios que tienen esa hora configurada en notif_resumen_diario_hora
+    // Envía solo a los usuarios que tienen esa hora configurada en notif_resumen_diario_hora.
+    // La hora se compara en la zona del NEGOCIO (Render corre en UTC): sin esto el
+    // "resumen de las 22h" llegaba a las 4pm en México y con el día ya cortado.
     cron.schedule('0 * * * *', async () => {
-        const horaActual = new Date().getHours();
+        const ahora = new Date();
         try {
             const owners = await User.findAll({ where: { role: 'owner', active: true }, attributes: ['id', 'settings'] });
             for (const owner of owners) {
                 let prefs = {};
                 try { prefs = JSON.parse(owner.settings || '{}'); } catch {}
                 if (prefs.notif_resumen_diario === false) continue;
+                const tz = normalizarZona(prefs.tz);
                 const horaDeseada = parseInt(prefs.notif_resumen_diario_hora ?? 22);
-                if (horaActual !== horaDeseada) continue;
+                if (horaLocal(tz, ahora) !== horaDeseada) continue;
 
-                const hoy = new Date();
-                hoy.setHours(0, 0, 0, 0);
+                const hoy = inicioDiaLocal(tz, ahora);
                 const pedidos = await Order.findAll({
-                    where: { business_id: owner.id, status: 'completado', createdAt: { [Op.gte]: hoy } },
+                    where: { business_id: owner.id, ...filtroVentaContable(), createdAt: { [Op.gte]: hoy } },
                     attributes: ['total']
                 });
                 const totalDia = pedidos.reduce((s, p) => s + parseFloat(p.total || 0), 0);
@@ -245,19 +253,23 @@ function iniciarCronJobs() {
         } catch (err) { logger.error(`[Cron resumen diario] ${err.message}`); }
     });
 
-    // Resumen semanal — cada lunes a las 8 AM
-    cron.schedule('0 8 * * 1', async () => {
+    // Resumen semanal — lunes a las 8 AM LOCALES de cada negocio.
+    // Corre cada hora y filtra por día+hora local (antes era '0 8 * * 1' = 8 AM UTC,
+    // o sea las 2 AM del domingo en México).
+    cron.schedule('0 * * * *', async () => {
+        const ahora = new Date();
         try {
             const owners = await User.findAll({ where: { role: 'owner', active: true }, attributes: ['id', 'settings'] });
-            const haceSiete = new Date();
-            haceSiete.setDate(haceSiete.getDate() - 7);
-            haceSiete.setHours(0, 0, 0, 0);
             for (const owner of owners) {
                 let prefs = {};
                 try { prefs = JSON.parse(owner.settings || '{}'); } catch {}
                 if (prefs.notif_resumen_semanal === false) continue;
+                const tz = normalizarZona(prefs.tz);
+                if (diaSemanaLocal(tz, ahora) !== 1 || horaLocal(tz, ahora) !== 8) continue;
+
+                const haceSiete = inicioDiaLocal(tz, ahora, -7);
                 const pedidos = await Order.findAll({
-                    where: { business_id: owner.id, status: 'completado', createdAt: { [Op.gte]: haceSiete } },
+                    where: { business_id: owner.id, ...filtroVentaContable(), createdAt: { [Op.gte]: haceSiete } },
                     attributes: ['total']
                 });
                 const total = pedidos.reduce((s, p) => s + parseFloat(p.total || 0), 0);
