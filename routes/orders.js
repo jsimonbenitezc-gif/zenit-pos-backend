@@ -256,6 +256,8 @@ async function procesarNotificacionesVenta(biz, resolvedItems, branchId, finalTo
 
 // Carga un pedido con sus relaciones para la respuesta del POS (mismo shape
 // para la creación normal y para las respuestas idempotentes).
+// ⚠️ SIN `image`: las fotos son data-URIs base64 en columnas TEXT y engordan la
+// respuesta de cada venta sin que ningún cliente las use aquí (ver §23 de CLAUDE.md).
 function cargarPedidoCompleto(orderId) {
     return Order.findByPk(orderId, {
         include: [
@@ -263,7 +265,7 @@ function cargarPedidoCompleto(orderId) {
             {
                 model: OrderItem,
                 as: 'items',
-                include: [{ model: Product, as: 'product', attributes: ['id', 'name', 'emoji', 'image'] }]
+                include: [{ model: Product, as: 'product', attributes: ['id', 'name', 'emoji'] }]
             },
             { model: User, as: 'creator', attributes: ['id', 'name'], required: false }
         ]
@@ -313,10 +315,12 @@ router.get('/', authenticate, async (req, res) => {
                 {
                     model: OrderItem,
                     as: 'items',
+                    // Sin `image` (base64): el historial se lista de a 50 pedidos y las
+                    // fotos multiplicaban el peso de la respuesta. El emoji basta.
                     include: [{
                         model: Product,
                         as: 'product',
-                        attributes: ['id', 'name', 'emoji', 'image']
+                        attributes: ['id', 'name', 'emoji']
                     }]
                 },
                 {
@@ -364,7 +368,7 @@ router.get('/:id', authenticate, async (req, res) => {
                     include: [{
                         model: Product,
                         as: 'product',
-                        attributes: ['id', 'name', 'description', 'emoji', 'image']
+                        attributes: ['id', 'name', 'description', 'emoji']
                     }]
                 },
                 {

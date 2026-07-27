@@ -193,7 +193,9 @@ router.get('/combos', authenticate, async (req, res) => {
             include: [{
                 model: ComboItem,
                 as: 'items',
-                include: [{ model: Product, as: 'product', attributes: ['id', 'name', 'price', 'emoji', 'image'] }]
+                // Sin `image`: el listado de combos arrastraba la foto base64 de cada
+                // producto incluido y ningún cliente la dibuja aquí (usan el emoji).
+                include: [{ model: Product, as: 'product', attributes: ['id', 'name', 'price', 'emoji'] }]
             }],
             order: [['name', 'ASC']]
         });

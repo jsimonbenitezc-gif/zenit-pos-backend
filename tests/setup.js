@@ -14,9 +14,14 @@ const jwt = require('jsonwebtoken');
 const sequelize = require('../config/database');
 const models = require('../models');
 
+const { manejadorDeErrores, LIMITE_BODY } = require('../middleware/errorHandler');
+const { limpiarCacheUsuarios } = require('../middleware/auth');
+
 // ── App Express ligera (sin Sentry, CORS, helmet, cron) ──
+// El límite del body y el manejador de errores son los MISMOS que en server.js,
+// para poder probar el mensaje de "contenido demasiado grande".
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: LIMITE_BODY }));
 
 app.use('/api/auth',       require('../routes/auth'));
 app.use('/api/products',   require('../routes/products'));
@@ -28,6 +33,8 @@ app.use('/api/staff',      require('../routes/staff'));
 app.use('/api/stats',      require('../routes/stats'));
 app.use('/api/settings',   require('../routes/settings'));
 app.use('/api/turnos',     require('../routes/turnos'));
+
+app.use(manejadorDeErrores);
 
 // ── Inicializar DB de test ───────────────────────────────
 let relationsReady = false;
@@ -50,6 +57,10 @@ async function initTestDb() {
     }
     // Limpiar todas las tablas para estado inicial limpio
     await sequelize.sync({ force: true });
+
+    // `force: true` reinicia los autoincrement: sin esto, un id reutilizado podría
+    // leer datos cacheados del usuario anterior (caché de middleware/auth.js).
+    limpiarCacheUsuarios();
 }
 
 // ── Helper: crear usuario owner con JWT ──────────────────

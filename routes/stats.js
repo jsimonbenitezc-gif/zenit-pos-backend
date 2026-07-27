@@ -200,7 +200,9 @@ router.get('/dashboard', authenticate, async (req, res) => {
                 {
                     model: Product,
                     as: 'product',
-                    attributes: ['id', 'name', 'emoji', 'image']
+                    // Sin `image`: el dashboard dibuja el emoji/ícono, y las fotos base64
+                    // viajaban además dentro del GROUP BY (ver §23 de CLAUDE.md).
+                    attributes: ['id', 'name', 'emoji']
                 }
             ],
             attributes: [
@@ -211,8 +213,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
                 'OrderItem.product_id',
                 sequelize.col('product.id'),
                 sequelize.col('product.name'),
-                sequelize.col('product.emoji'),
-                sequelize.col('product.image')
+                sequelize.col('product.emoji')
             ],
             order: [[sequelize.literal('total_vendido'), 'DESC']],
             limit: 5,
@@ -302,7 +303,6 @@ router.get('/dashboard', authenticate, async (req, res) => {
             topProductos: topProductos.map(p => ({
                 nombre: p.product.name,
                 emoji: p.product.emoji,
-                image: p.product.image,
                 total_vendido: parseInt(p.total_vendido)
             })),
             ultimasVentas: ultimasVentasFormateadas,
@@ -384,7 +384,7 @@ router.get('/products', authenticate, async (req, res) => {
                 {
                     model: Product,
                     as: 'product',
-                    attributes: ['id', 'name', 'emoji', 'image', 'price']
+                    attributes: ['id', 'name', 'emoji', 'price']
                 }
             ],
             attributes: [
@@ -392,7 +392,7 @@ router.get('/products', authenticate, async (req, res) => {
                 [sequelize.fn('SUM', sequelize.col('quantity')), 'cantidad_vendida'],
                 [sequelize.fn('SUM', sequelize.col('subtotal')), 'ingresos']
             ],
-            group: ['product_id', 'product.id', 'product.name', 'product.emoji', 'product.image', 'product.price'],
+            group: ['product_id', 'product.id', 'product.name', 'product.emoji', 'product.price'],
             order: [[sequelize.literal('cantidad_vendida'), 'DESC']],
             limit: limit ? parseInt(limit) : 20,
             raw: true,

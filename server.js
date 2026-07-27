@@ -22,6 +22,7 @@ const helmet = require('helmet');
 const path = require('path');
 const { syncDatabase } = require('./models');
 const logger = require('./utils/logger');
+const { manejadorDeErrores, LIMITE_BODY } = require('./middleware/errorHandler');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -67,8 +68,10 @@ if (process.env.SENTRY_DSN) {
     app.use(Sentry.Handlers.requestHandler());
 }
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// Límite explícito del body: las fotos viajan como data-URI base64 y el default de
+// Express (100kb) las rechazaba con un 500 genérico. Ver middleware/errorHandler.js.
+app.use(express.json({ limit: LIMITE_BODY }));
+app.use(express.urlencoded({ extended: true, limit: LIMITE_BODY }));
 
 // Logging
 app.use((req, res, next) => {
@@ -183,26 +186,9 @@ if (process.env.SENTRY_DSN) {
     app.use(Sentry.Handlers.errorHandler());
 }
 
-// Helper para eliminar datos sensibles antes de loguear
-const camposSensibles = ['password', 'pin', 'currentPassword', 'newPassword', 'refreshToken'];
-function sanitizarParaLog(body) {
-    if (!body || typeof body !== 'object') return body;
-    const copia = { ...body };
-    for (const campo of camposSensibles) {
-        if (campo in copia) copia[campo] = '[REDACTADO]';
-    }
-    return copia;
-}
-
-// Error handling
-app.use((err, req, res, next) => {
-    logger.error(`${req.method} ${req.path} → ${err.message}`, {
-        stack: err.stack,
-        status: err.status,
-        body: req.body ? JSON.stringify(sanitizarParaLog(req.body)).substring(0, 500) : undefined,
-    });
-    res.status(err.status || 500).json({ error: 'Error interno del servidor' });
-});
+// Error handling (incluye el mensaje claro de "body demasiado grande" y el
+// saneado de campos sensibles antes de loguear) — ver middleware/errorHandler.js
+app.use(manejadorDeErrores);
 
 // 404
 app.use((req, res) => {

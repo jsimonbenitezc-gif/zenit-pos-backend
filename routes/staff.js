@@ -5,7 +5,7 @@ const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const rateLimit = require('express-rate-limit');
 const { User } = require('../models');
-const { authenticate, isOwner } = require('../middleware/auth');
+const { authenticate, isOwner, invalidarUsuario } = require('../middleware/auth');
 const { Op } = require('sequelize');
 const { paginate, paginatedResponse } = require('../utils/pagination');
 
@@ -141,6 +141,10 @@ router.put('/:id', authenticate, isOwner, async (req, res) => {
             active: active !== undefined ? active : empleado.active
         });
 
+        // El rol y el estado viven en el caché de `middleware/auth.js`: sin esto,
+        // desactivar a un empleado tardaría hasta 30s en cortarle el acceso.
+        invalidarUsuario(empleado.id);
+
         res.json({
             id: empleado.id,
             name: empleado.name,
@@ -164,6 +168,7 @@ router.delete('/:id', authenticate, isOwner, async (req, res) => {
             return res.status(404).json({ error: 'Empleado no encontrado' });
         }
         await empleado.update({ active: false });
+        invalidarUsuario(empleado.id);   // corta el acceso al instante (ver caché en middleware/auth.js)
         res.json({ message: 'Empleado desactivado correctamente' });
     } catch (error) {
         logger.error('Error al eliminar empleado:', error);
