@@ -8,14 +8,13 @@ const { User } = require('../models');
 const { authenticate, isOwner, invalidarUsuario } = require('../middleware/auth');
 const { Op } = require('sequelize');
 const { paginate, paginatedResponse } = require('../utils/pagination');
+const { emitirRefreshToken, revocarTodasLasSesiones } = require('../utils/refreshTokens');
 
-// Genera un refresh token opaco y lo guarda hasheado en DB
+// Genera un refresh token opaco y crea la sesión (una fila por dispositivo).
+// Ver utils/refreshTokens.js: antes se guardaba en users.refresh_token_hash y el
+// login de un equipo cerraba la sesión de los demás.
 async function generateAndSaveRefreshToken(user) {
-    const refreshToken = crypto.randomBytes(64).toString('hex');
-    const refreshTokenHash = crypto.createHash('sha256').update(refreshToken).digest('hex');
-    const refreshTokenExpires = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-    await user.update({ refresh_token_hash: refreshTokenHash, refresh_token_expires: refreshTokenExpires });
-    return refreshToken;
+    return emitirRefreshToken(user);
 }
 
 // Protección: máximo 10 intentos de login cada 15 minutos por IP
@@ -144,6 +143,10 @@ router.put('/:id', authenticate, isOwner, async (req, res) => {
         // El rol y el estado viven en el caché de `middleware/auth.js`: sin esto,
         // desactivar a un empleado tardaría hasta 30s en cortarle el acceso.
         invalidarUsuario(empleado.id);
+        // Al desactivarlo, cerrar además sus sesiones en todos los dispositivos.
+        if (empleado.active === false) {
+            revocarTodasLasSesiones(empleado.id).catch(() => {});
+        }
 
         res.json({
             id: empleado.id,
@@ -169,6 +172,7 @@ router.delete('/:id', authenticate, isOwner, async (req, res) => {
         }
         await empleado.update({ active: false });
         invalidarUsuario(empleado.id);   // corta el acceso al instante (ver caché en middleware/auth.js)
+        revocarTodasLasSesiones(empleado.id).catch(() => {}); // y cierra sus sesiones abiertas
         res.json({ message: 'Empleado desactivado correctamente' });
     } catch (error) {
         logger.error('Error al eliminar empleado:', error);

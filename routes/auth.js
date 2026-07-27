@@ -9,6 +9,7 @@ const { authenticate } = require('../middleware/auth');
 const { enviarNotificacion } = require('../utils/push');
 const { enviarCorreoVerificacion, enviarCorreoReset } = require('../utils/email');
 const { normalizarZona } = require('../utils/tz');
+const { emitirRefreshToken, consumirRefreshToken, revocarTodasLasSesiones } = require('../utils/refreshTokens');
 
 // Vigencia del token de verificación de correo
 const VERIFICATION_TTL_MS = 24 * 60 * 60 * 1000; // 24 horas
@@ -43,16 +44,11 @@ const registerLimiter = rateLimit({
     legacyHeaders: false
 });
 
-// Genera un refresh token opaco y lo guarda hasheado en DB
+// Genera un refresh token opaco y crea la SESIÓN correspondiente.
+// Una fila por dispositivo: entrar desde el celular ya no cierra la del desktop.
+// Ver utils/refreshTokens.js.
 async function generateAndSaveRefreshToken(user, options = {}) {
-    const refreshToken = crypto.randomBytes(64).toString('hex');
-    const refreshTokenHash = crypto.createHash('sha256').update(refreshToken).digest('hex');
-    const refreshTokenExpires = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 días
-    await user.update(
-        { refresh_token_hash: refreshTokenHash, refresh_token_expires: refreshTokenExpires },
-        options
-    );
-    return refreshToken;
+    return emitirRefreshToken(user, options);
 }
 
 // POST /api/auth/login
@@ -218,6 +214,45 @@ router.post('/change-password', authenticate, async (req, res) => {
     }
 });
 
+// Protección: máximo 10 verificaciones de contraseña por minuto por IP
+const verifyPasswordLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 10,
+    message: { error: 'Demasiados intentos. Espera un minuto.' },
+    standardHeaders: true,
+    legacyHeaders: false
+});
+
+// POST /api/auth/verify-password — Confirmar la contraseña de la cuenta SIN tocar la sesión.
+// La usan las acciones de configuración que exigen "contraseña de administrador"
+// (p.ej. cambiar la sucursal de un equipo, CLAUDE.md §24). Existe para no tener que
+// llamar a /login, que rota los tokens y consume el rate limit de inicio de sesión.
+router.post('/verify-password', verifyPasswordLimiter, authenticate, async (req, res) => {
+    try {
+        const { password } = req.body;
+        if (!password) {
+            return res.status(400).json({ error: 'La contraseña es requerida' });
+        }
+
+        // Se verifica contra el DUEÑO del negocio: los empleados entran con PIN, y el
+        // "administrador" de una acción de configuración siempre es la cuenta titular.
+        const dueno = await User.findByPk(req.user.business_id);
+        if (!dueno) {
+            return res.status(404).json({ error: 'Cuenta no encontrada' });
+        }
+
+        const valida = await dueno.comparePassword(password);
+        if (!valida) {
+            return res.status(401).json({ error: 'Contraseña incorrecta' });
+        }
+
+        res.json({ valid: true });
+    } catch (error) {
+        logger.error('Error al verificar contraseña:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
 // GET /api/auth/me - Validar token actual
 router.get('/me', authenticate, async (req, res) => {
     try {
@@ -263,27 +298,14 @@ router.post('/refresh', refreshLimiter, async (req, res) => {
             return res.status(400).json({ error: 'refreshToken es requerido' });
         }
 
-        // Hashear el token recibido y buscar en DB
-        const hash = crypto.createHash('sha256').update(refreshToken).digest('hex');
-        const user = await User.findOne({ where: { refresh_token_hash: hash, active: true } });
-
-        if (!user) {
-            return res.status(401).json({ error: 'Refresh token inválido' });
-        }
-
-        // Verificar expiración
-        if (user.refresh_token_expires && new Date(user.refresh_token_expires) < new Date()) {
-            await user.update({ refresh_token_hash: null, refresh_token_expires: null });
-            return res.status(401).json({ error: 'Refresh token expirado. Inicia sesión de nuevo.' });
-        }
-
-        // Rotación atómica: invalidar viejo + generar nuevo en una transacción
+        // Rotación atómica: consumir el viejo + emitir uno nuevo en una transacción.
+        // El token consumido pertenece a UNA sesión (un dispositivo): las sesiones de
+        // los demás equipos del negocio no se tocan. Ver utils/refreshTokens.js.
+        let user = null;
         const resultado = await sequelize.transaction(async (t) => {
-            // Invalidar el refresh token viejo inmediatamente
-            await user.update(
-                { refresh_token_hash: null, refresh_token_expires: null },
-                { transaction: t }
-            );
+            const sesion = await consumirRefreshToken(refreshToken, { transaction: t });
+            if (!sesion) return null;
+            user = sesion.user;
 
             // Generar nuevo access token
             const businessId = user.business_id || user.id;
@@ -306,6 +328,10 @@ router.post('/refresh', refreshLimiter, async (req, res) => {
 
             return { nuevoAccessToken, nuevoRefreshToken, businessId };
         });
+
+        if (!resultado) {
+            return res.status(401).json({ error: 'Refresh token inválido o expirado. Inicia sesión de nuevo.' });
+        }
 
         res.json({
             token: resultado.nuevoAccessToken,
@@ -588,9 +614,10 @@ router.post('/reset-password', async (req, res) => {
             reset_token_expires: null,
             email_verified: true,
             verification_token: null,
-            refresh_token_hash: null,
-            refresh_token_expires: null,
         });
+        // Cierra la sesión en TODOS los dispositivos (quien reseteó la contraseña
+        // puede estar echando a alguien que tenía la anterior).
+        await revocarTodasLasSesiones(user.id);
 
         return res.json({ message: 'Contraseña actualizada. Inicia sesión con tu nueva contraseña.' });
     } catch (error) {

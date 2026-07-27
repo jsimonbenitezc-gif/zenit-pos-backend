@@ -5,6 +5,7 @@ const { Op } = require('sequelize');
 const { Turno, Order, sequelize } = require('../models');
 const { authenticate } = require('../middleware/auth');
 const { filtroVentaContable } = require('../utils/ordersFilter');
+const { resolverBranchId, filtroSucursalTurno, BranchError } = require('../utils/branch');
 const { configurarSSE } = require('../utils/sse');
 const { enviarNotificacion, getPrefs } = require('../utils/push');
 
@@ -29,7 +30,10 @@ router.get('/events', (req, res) => {
 router.get('/activo', authenticate, async (req, res) => {
     try {
         const where = { business_id: req.user.business_id, estado: 'abierto' };
-        if (req.query.branch_id) where.branch_id = req.query.branch_id;
+        // Un empleado asignado a una sucursal solo ve el turno de la suya: así no puede
+        // cerrar por error la caja de otra sucursal.
+        if (req.user.branch_id) where.branch_id = req.user.branch_id;
+        else if (req.query.branch_id) where.branch_id = req.query.branch_id;
 
         const turno = await Turno.findOne({ where, order: [['apertura', 'DESC']] });
         if (!turno) return res.json(null);
@@ -44,7 +48,8 @@ router.get('/activo', authenticate, async (req, res) => {
 router.get('/historial', authenticate, async (req, res) => {
     try {
         const where = { business_id: req.user.business_id, estado: 'cerrado' };
-        if (req.query.branch_id) where.branch_id = req.query.branch_id;
+        if (req.user.branch_id) where.branch_id = req.user.branch_id;
+        else if (req.query.branch_id) where.branch_id = req.query.branch_id;
 
         const turnos = await Turno.findAll({
             where,
@@ -69,6 +74,19 @@ router.post('/', authenticate, async (req, res) => {
             return res.status(400).json({ error: 'El fondo inicial no puede ser negativo' });
         }
 
+        // Sucursal del turno (BLOQUE 4): un turno sin sucursal hacía que el cierre
+        // sumara los pedidos de TODAS las sucursales. Ver utils/branch.js.
+        let branchIdFinal;
+        try {
+            branchIdFinal = await resolverBranchId({ user: req.user, branchId: branch_id, transaction: t });
+        } catch (branchErr) {
+            if (branchErr instanceof BranchError) {
+                await t.rollback();
+                return res.status(branchErr.status).json({ error: branchErr.message });
+            }
+            throw branchErr;
+        }
+
         // Solo puede haber un turno abierto por sucursal.
         // El FOR UPDATE bloquea la fila si existe; el índice parcial único en BD
         // rechaza la creación si dos requests llegan al mismo tiempo.
@@ -76,7 +94,7 @@ router.post('/', authenticate, async (req, res) => {
             where: {
                 business_id: req.user.business_id,
                 estado: 'abierto',
-                ...(branch_id ? { branch_id } : { branch_id: null })
+                branch_id: branchIdFinal
             },
             lock: t.LOCK.UPDATE,
             transaction: t
@@ -88,7 +106,7 @@ router.post('/', authenticate, async (req, res) => {
 
         const turno = await Turno.create({
             business_id: req.user.business_id,
-            branch_id:   branch_id   || null,
+            branch_id:   branchIdFinal,
             cajero_nombre: cajero_nombre || 'Sin nombre',
             rol:         rol          || null,
             fondo_inicial: parseFloat(fondo_inicial) || 0,
@@ -132,7 +150,7 @@ router.get('/:id/totales', authenticate, async (req, res) => {
                 business_id: req.user.business_id,
                 ...filtroVentaContable(),
                 createdAt: { [Op.gte]: turno.apertura },
-                ...(turno.branch_id ? { branch_id: turno.branch_id } : {})
+                ...(await filtroSucursalTurno(turno))
             },
             attributes: ['id', 'total', 'payment_method']
         });
@@ -182,7 +200,7 @@ router.put('/:id/cerrar', authenticate, async (req, res) => {
                 business_id: req.user.business_id,
                 ...filtroVentaContable(),
                 createdAt: { [Op.between]: [turno.apertura, ahora] },
-                ...(turno.branch_id ? { branch_id: turno.branch_id } : {})
+                ...(await filtroSucursalTurno(turno))
             },
             attributes: ['id', 'total', 'payment_method']
         });

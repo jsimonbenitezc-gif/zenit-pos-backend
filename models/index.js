@@ -42,6 +42,9 @@ const ProcessedWebhook = require('./ProcessedWebhook');
 const ShoppingList = require('./ShoppingList');
 const ShoppingListItem = require('./ShoppingListItem');
 
+// Sesiones: un refresh token por dispositivo
+const RefreshToken = require('./RefreshToken');
+
 // Objeto con todos los modelos
 const models = {
     User,
@@ -66,6 +69,7 @@ const models = {
     ProcessedWebhook,
     ShoppingList,
     ShoppingListItem,
+    RefreshToken,
 };
 
 // Definir relaciones
@@ -144,6 +148,10 @@ const setupRelations = () => {
 
     // ShoppingList <-> Branch
     models.ShoppingList.belongsTo(models.Branch, { foreignKey: 'branch_id', as: 'branch' });
+
+    // User <-> RefreshToken (una fila por sesión/dispositivo)
+    models.User.hasMany(models.RefreshToken, { foreignKey: 'user_id', as: 'refreshTokens', onDelete: 'CASCADE' });
+    models.RefreshToken.belongsTo(models.User, { foreignKey: 'user_id', as: 'user' });
 };
 
 // Las migraciones ahora se ejecutan via sequelize-cli.
@@ -164,6 +172,28 @@ const runMigrations = async () => {
             );
         } catch (err) {
             console.error('❌ Error asegurando orders.client_uuid:', err.message);
+        }
+
+        // Sucursal de las mesas. Antes las mesas eran del negocio entero: un local con
+        // dos sucursales veía el MISMO mapa de mesas en ambas.
+        try {
+            await sequelize.query('ALTER TABLE tables ADD COLUMN IF NOT EXISTS branch_id INTEGER');
+        } catch (err) {
+            console.error('❌ Error asegurando tables.branch_id:', err.message);
+        }
+
+        // Sesiones por dispositivo. `sequelize.sync()` ya crea la tabla si no existe,
+        // pero el índice único del hash y el de user_id se aseguran aquí porque el
+        // sync no toca tablas existentes (ver CLAUDE.md §19.4).
+        try {
+            await sequelize.query(
+                'CREATE UNIQUE INDEX IF NOT EXISTS refresh_tokens_hash_uq ON refresh_tokens (token_hash)'
+            );
+            await sequelize.query(
+                'CREATE INDEX IF NOT EXISTS refresh_tokens_user_idx ON refresh_tokens (user_id)'
+            );
+        } catch (err) {
+            console.error('❌ Error asegurando índices de refresh_tokens:', err.message);
         }
 
         // Estado 'devuelto' (devolución de pedidos ya elaborados). El ENUM de Sequelize

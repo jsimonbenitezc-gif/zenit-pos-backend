@@ -3,6 +3,7 @@ const router = express.Router();
 const logger = require('../utils/logger');
 const { Table, Order, OrderItem, Product } = require('../models');
 const { authenticate, isOwner } = require('../middleware/auth');
+const { resolverBranchId, BranchError } = require('../utils/branch');
 const { Op } = require('sequelize');
 
 // ── GET /api/tables
@@ -11,8 +12,15 @@ router.get('/', authenticate, async (req, res) => {
     try {
         const biz = req.user.business_id;
 
+        // Filtro por sucursal. Las mesas sin sucursal (creadas antes de que las mesas
+        // la tuvieran) se ven siempre, para no vaciarle el comedor a nadie al desplegar.
+        const pedida = req.user.branch_id || req.query.branch_id;
+        const filtroSucursal = pedida
+            ? { branch_id: { [Op.or]: [{ [Op.is]: null }, { [Op.eq]: parseInt(pedida) }] } }
+            : {};
+
         const tables = await Table.findAll({
-            where: { business_id: biz, active: true },
+            where: { business_id: biz, active: true, ...filtroSucursal },
             order: [['zone', 'ASC'], ['name', 'ASC']],
         });
 
@@ -58,11 +66,23 @@ router.get('/', authenticate, async (req, res) => {
 // ── POST /api/tables  (solo dueño)
 router.post('/', authenticate, isOwner, async (req, res) => {
     try {
-        const { name, zone, capacity } = req.body;
+        const { name, zone, capacity, branch_id } = req.body;
         if (!name?.trim()) return res.status(400).json({ error: 'El nombre es requerido' });
+
+        // La mesa nace en la sucursal del equipo que la crea (misma regla que las ventas)
+        let branchIdFinal;
+        try {
+            branchIdFinal = await resolverBranchId({ user: req.user, branchId: branch_id });
+        } catch (branchErr) {
+            if (branchErr instanceof BranchError) {
+                return res.status(branchErr.status).json({ error: branchErr.message });
+            }
+            throw branchErr;
+        }
 
         const table = await Table.create({
             business_id: req.user.business_id,
+            branch_id: branchIdFinal,
             name: name.trim(),
             zone: zone?.trim() || 'General',
             capacity: parseInt(capacity) || 4,

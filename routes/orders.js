@@ -4,6 +4,7 @@ const logger = require('../utils/logger');
 const { Order, OrderItem, Product, Customer, Table, ProductRecipe, Ingredient, PreparationItem, PrivilegedActionLog, BranchStock, User, Discount, sequelize } = require('../models');
 const { authenticate } = require('../middleware/auth');
 const { verifyEmployeePin } = require('../utils/verifyPin');
+const { resolverBranchId, BranchError } = require('../utils/branch');
 const { Op } = require('sequelize');
 const { notificarAudit } = require('./audit');
 const { enviarNotificacion, getPrefs } = require('../utils/push');
@@ -450,6 +451,20 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
             }
         }
 
+        // Sucursal del registro (BLOQUE 4): ninguna venta puede quedar huérfana.
+        // Con una sola sucursal se asigna sola; con varias, el equipo debe haber
+        // elegido la suya. Ver utils/branch.js para las reglas completas.
+        let branchIdFinal;
+        try {
+            branchIdFinal = await resolverBranchId({ user: req.user, branchId: branch_id, transaction: t });
+        } catch (branchErr) {
+            if (branchErr instanceof BranchError) {
+                await t.rollback();
+                return res.status(branchErr.status).json({ error: branchErr.message });
+            }
+            throw branchErr;
+        }
+
         // Autorización de descuentos (seguridad de dinero):
         //  - descuentoAutorizadoPorId: el descuento corresponde a un Discount configurado
         //    del negocio (autorización implícita del dueño al crearlo).
@@ -517,7 +532,7 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
         // Si falta stock y el cliente no ha confirmado con skip_stock_check, devolver warnings
         // para que el frontend muestre el modal "¿continuar?" al usuario.
         if (!skip_stock_check) {
-            const warnings = await validarStockIngredientes(resolvedItems, branch_id || null, t);
+            const warnings = await validarStockIngredientes(resolvedItems, branchIdFinal, t);
             if (warnings.length > 0) {
                 await t.rollback();
                 return res.status(200).json({ stock_warning: true, warnings });
@@ -582,7 +597,7 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
             maps_link,
             notes,
             business_id: biz,
-            branch_id: branch_id || null,
+            branch_id: branchIdFinal,
             table_id: table_id || null,
             guests: guests ? parseInt(guests) : null,
             created_by: req.user.id,
@@ -600,7 +615,7 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
             }, { transaction: t });
 
             // Descontar insumos según la receta del producto (si tiene receta)
-            await descontarIngredientesDeReceta(product.id, qty, t, branch_id || null);
+            await descontarIngredientesDeReceta(product.id, qty, t, branchIdFinal);
         }
 
         // Actualizar puntos de fidelidad dentro de la misma transacción
@@ -635,7 +650,7 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
             }
             await PrivilegedActionLog.create({
                 business_id: biz,
-                branch_id: branch_id || null,
+                branch_id: branchIdFinal,
                 employee_id: actorId,
                 employee_name: actorNombre,
                 action_type: 'apply_discount',
@@ -658,7 +673,7 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
         // modal de venta en el POS. Ahora corren en segundo plano.
         res.status(201).json(fullOrder);
 
-        procesarNotificacionesVenta(biz, resolvedItems, branch_id || null, finalTotal, payment_method)
+        procesarNotificacionesVenta(biz, resolvedItems, branchIdFinal, finalTotal, payment_method)
             .catch(err => logger.error('Notificaciones post-venta:', err));
     } catch (error) {
         await t.rollback();

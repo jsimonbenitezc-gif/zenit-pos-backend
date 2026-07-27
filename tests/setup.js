@@ -33,6 +33,7 @@ app.use('/api/staff',      require('../routes/staff'));
 app.use('/api/stats',      require('../routes/stats'));
 app.use('/api/settings',   require('../routes/settings'));
 app.use('/api/turnos',     require('../routes/turnos'));
+app.use('/api/tables',     require('../routes/tables'));
 
 app.use(manejadorDeErrores);
 
