@@ -10,6 +10,28 @@ const authenticate = async (req, res, next) => {
         }
 
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+        // Tokens del KDS (purpose:'kds'): se firman con el MISMO JWT_SECRET y viajan
+        // en un QR, así que hay que acotarlos. Sin este cerrojo servían como token de
+        // sesión completo: al no traer `id`, la búsqueda de usuario fallaba, se caía al
+        // fallback `business_id = decoded.business_id` y quedaban habilitados contra
+        // cualquier ruta que filtre por negocio (clientes, inventario, ventas...).
+        // Solo pueden leer la cola de cocina, que es lo único que consume kds.html.
+        if (decoded.purpose === 'kds') {
+            const esColaDeCocina = req.method === 'GET'
+                && req.baseUrl === '/api/orders'
+                && (req.path === '/' || req.path === '');
+            if (!esColaDeCocina) {
+                return res.status(403).json({ error: 'Este token solo permite consultar la cola de cocina' });
+            }
+            req.user = {
+                business_id: decoded.business_id,
+                branch_id: decoded.branch_id ?? null,
+                esKds: true
+            };
+            return next();
+        }
+
         req.user = decoded;
 
         // owners: business_id = su propio id | staff: business_id = id del dueño al que pertenecen

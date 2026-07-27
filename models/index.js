@@ -192,6 +192,60 @@ const runMigrations = async () => {
             console.error('❌ Error asegurando columnas de verificación de correo:', err.message);
         }
 
+        // Constraints UNIQUE duplicadas. Sequelize 6 emite un ALTER TABLE ADD CONSTRAINT
+        // en cada arranque para las columnas declaradas `unique: true`, sin comprobar si
+        // ya existe: tras ~60 despliegues `users` acumuló 63 constraints idénticas sobre
+        // (username) y `customers` 45 sobre (phone), revalidadas en cada INSERT.
+        //
+        // En customers la constraint global era además INCORRECTA. El aislamiento por
+        // negocio lo da `customers_business_phone_unique (business_id, phone)`. Con la
+        // global, dos negocios distintos no podían tener un cliente con el mismo teléfono:
+        // routes/customers.js valida el duplicado por negocio (pasa), y luego el INSERT
+        // chocaba contra la constraint global → 500 genérico y cliente imposible de crear.
+        // Por eso se eliminan TODAS las de (phone).
+        //
+        // En users la unicidad global de `username` (el email de login) SÍ es correcta:
+        // se conserva exactamente una. `User.js` ya no declara `unique: true`, así que
+        // sync() deja de acumularlas; esta limpieza converge a 1 aunque se re-ejecute.
+        try {
+            await sequelize.query(`
+                DO $$
+                DECLARE c record; conservar text;
+                BEGIN
+                    FOR c IN SELECT conname FROM pg_constraint
+                             WHERE contype = 'u' AND conrelid = 'customers'::regclass
+                               AND pg_get_constraintdef(oid) = 'UNIQUE (phone)' LOOP
+                        EXECUTE format('ALTER TABLE customers DROP CONSTRAINT %I', c.conname);
+                    END LOOP;
+
+                    SELECT conname INTO conservar FROM pg_constraint
+                        WHERE contype = 'u' AND conrelid = 'users'::regclass
+                          AND pg_get_constraintdef(oid) = 'UNIQUE (username)'
+                        ORDER BY conname LIMIT 1;
+                    IF conservar IS NOT NULL THEN
+                        FOR c IN SELECT conname FROM pg_constraint
+                                 WHERE contype = 'u' AND conrelid = 'users'::regclass
+                                   AND pg_get_constraintdef(oid) = 'UNIQUE (username)'
+                                   AND conname <> conservar LOOP
+                            EXECUTE format('ALTER TABLE users DROP CONSTRAINT %I', c.conname);
+                        END LOOP;
+                    END IF;
+                END $$;
+            `);
+        } catch (err) {
+            console.error('❌ Error limpiando constraints UNIQUE duplicadas:', err.message);
+        }
+
+        // La unicidad correcta de clientes (por negocio, solo activos). En producción se
+        // creó a mano; se garantiza aquí para que una instalación nueva no quede sin ella.
+        try {
+            await sequelize.query(
+                'CREATE UNIQUE INDEX IF NOT EXISTS customers_business_phone_unique ON customers (business_id, phone) WHERE active = true'
+            );
+        } catch (err) {
+            console.error('❌ Error asegurando customers_business_phone_unique:', err.message);
+        }
+
         // products.image y categories.image deben ser TEXT para guardar data URIs
         // base64 (~15-40KB). Sin esto quedan en VARCHAR(255) y el INSERT falla con
         // "value too long", perdiendo la foto. La migración CLI equivalente

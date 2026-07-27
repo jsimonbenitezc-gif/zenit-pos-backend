@@ -113,7 +113,13 @@ app.post('/api/kds/token', authenticate, (req, res) => {
             purpose: 'kds'
         },
         process.env.JWT_SECRET,
-        { expiresIn: '2h' }
+        // 12h = un turno completo. Antes eran 2h, lo que obligaba a re-escanear el QR
+        // en plena hora pico. Ampliarlo es seguro AHORA porque el middleware `authenticate`
+        // acota estos tokens a la lectura de la cola de cocina y nada más; con el token
+        // sin acotar, 12h habría sido una llave maestra de medio día.
+        // La solución definitiva (aprobación de dispositivos con PIN y revocación) está
+        // en PLAN_ARREGLOS_V5.md → BLOQUE 13.
+        { expiresIn: '12h' }
     );
     res.json({ kdsToken });
 });

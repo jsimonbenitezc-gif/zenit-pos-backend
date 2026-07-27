@@ -10,8 +10,11 @@ const User = sequelize.define('User', {
     },
     username: {
         type: DataTypes.STRING,
-        allowNull: false,
-        unique: true
+        allowNull: false
+        // La unicidad la impone la BD (una sola constraint UNIQUE (username)).
+        // Declararla aquí hacía que sync() añadiera una constraint idéntica en CADA
+        // arranque: llegaron a ser 63, revalidadas en cada alta de usuario.
+        // El duplicado ya se valida en la app: POST /api/auth/register responde 409.
     },
     password: {
         type: DataTypes.STRING,
