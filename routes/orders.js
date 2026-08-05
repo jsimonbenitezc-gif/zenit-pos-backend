@@ -5,6 +5,7 @@ const { Order, OrderItem, Product, Customer, Table, ProductRecipe, Ingredient, P
 const { authenticate } = require('../middleware/auth');
 const { verifyEmployeePin } = require('../utils/verifyPin');
 const { resolverBranchId, BranchError } = require('../utils/branch');
+const { resolverFechaVenta, resolverPrecioUnitario, precioDifiere } = require('../utils/ventaOffline');
 const { Op } = require('sequelize');
 const { notificarAudit } = require('./audit');
 const { enviarNotificacion, getPrefs } = require('../utils/push');
@@ -273,6 +274,17 @@ function cargarPedidoCompleto(orderId) {
     });
 }
 
+// Pedido + items, shape que esperan las pantallas de mesas al agregar/quitar
+// productos (incluye `price` porque ahí sí se re-dibuja el precio del catálogo).
+function cargarPedidoConItems(orderId) {
+    return Order.findByPk(orderId, {
+        include: [{
+            model: OrderItem, as: 'items',
+            include: [{ model: Product, as: 'product', attributes: ['id', 'name', 'emoji', 'price'] }],
+        }],
+    });
+}
+
 // GET /api/orders
 router.get('/', authenticate, async (req, res) => {
     try {
@@ -404,8 +416,22 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
             table_id, guests, discount_amount, discount_id,
             employee_id: disc_employee_id, pin: disc_pin,
             loyalty_points_used, loyalty_points_earned, loyalty_discount_amount,
-            skip_stock_check, client_uuid,
+            skip_stock_check, client_uuid, sold_at,
         } = req.body;
+
+        // Venta DIFERIDA (BLOQUE 5): la hizo el POS sin internet y llega ahora.
+        // Se reconoce por traer `sold_at` (hora real de la venta) junto al
+        // client_uuid de la cola offline. En ese caso —y solo en ese caso— se
+        // respetan la hora y los precios que declara el cliente: son los que el
+        // negocio realmente cobró. Una venta online normal sigue igual que antes
+        // (hora y precios del servidor). Ver utils/ventaOffline.js.
+        const { fecha: fechaVenta, motivo: motivoFecha } = resolverFechaVenta(sold_at);
+        const esVentaDiferida = Boolean(client_uuid && fechaVenta);
+        if (sold_at && !fechaVenta) {
+            // Nunca se rechaza la venta por esto: se registra con la hora del
+            // servidor y queda el aviso para diagnosticar el reloj del equipo.
+            logger.warn(`sold_at descartado (${motivoFecha}) en venta de negocio ${biz}: ${sold_at}`);
+        }
 
         // Idempotencia: si ya existe un pedido con este client_uuid en el negocio,
         // devolverlo sin reprocesar. Protege contra reintentos (timeout de red tras
@@ -501,6 +527,10 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
         // y validar que cada producto pertenezca al negocio
         let calculatedTotal = 0;
         const resolvedItems = [];
+        // Items cuyo precio cobrado difiere del precio actual del catálogo (solo
+        // puede pasar en ventas diferidas). Se auditan al final: es dinero que
+        // salió a un precio que hoy no existe, y el dueño debe poder verlo.
+        const preciosDistintos = [];
 
         for (const item of items) {
             const productId = item.product_id || item.id;
@@ -515,10 +545,21 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
             }
 
             const qty = Math.max(1, parseInt(item.quantity) || 1);
-            const unitPrice = parseFloat(product.price);
+            // En una venta diferida vale el precio que se cobró, no el de hoy:
+            // si el dueño subió los precios mientras el equipo estaba sin red,
+            // cobrarle de más al ticket ya entregado descuadra la caja.
+            const precioCatalogo = parseFloat(product.price);
+            const { unitPrice, origen } = resolverPrecioUnitario(precioCatalogo, item.unit_price, esVentaDiferida);
             if (!Number.isFinite(unitPrice) || unitPrice <= 0) {
                 await t.rollback();
                 return res.status(400).json({ error: `Precio inválido para el producto ${product.name || productId}` });
+            }
+            if (origen === 'cliente' && precioDifiere(unitPrice, precioCatalogo)) {
+                preciosDistintos.push({
+                    producto: product.name,
+                    cobrado: unitPrice,
+                    catalogo: Number.isFinite(precioCatalogo) ? precioCatalogo : null
+                });
             }
             const subtotal = parseFloat((qty * unitPrice).toFixed(2));
             calculatedTotal += subtotal;
@@ -602,6 +643,13 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
             guests: guests ? parseInt(guests) : null,
             created_by: req.user.id,
             client_uuid: client_uuid || null,
+            // Hora REAL de la venta. Sequelize solo pone `now` en createdAt si no
+            // viene un valor; `updatedAt` sí queda con la hora del servidor, así
+            // que el par (createdAt, updatedAt) deja ver cuándo se vendió y cuándo
+            // llegó. Todo lo que reporta ventas (stats, turnos, filtros de fecha,
+            // orden del historial) usa createdAt, así que con esto la venta cae
+            // sola en el día y el turno correctos.
+            ...(esVentaDiferida ? { createdAt: fechaVenta } : {}),
         }, { transaction: t });
 
         for (const { product, qty, unitPrice, subtotal, notes: itemNotes } of resolvedItems) {
@@ -660,10 +708,28 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
             }, { transaction: t });
         }
 
+        // Rastro de los precios que llegaron distintos al catálogo. No bloquea nada
+        // (la venta ya ocurrió y hay que registrarla), pero deja visible el caso en
+        // que un equipo cobró un precio que hoy no existe: casi siempre es un cambio
+        // de precio durante el corte de red, y si no lo es, aquí se ve.
+        if (preciosDistintos.length > 0) {
+            const actor = await User.findByPk(req.user.id, { attributes: ['id', 'name'], transaction: t });
+            await PrivilegedActionLog.create({
+                business_id: biz,
+                branch_id: branchIdFinal,
+                employee_id: req.user.id,
+                employee_name: actor?.name || 'Sin identificar',
+                action_type: 'offline_price',
+                target_description: `Pedido #${order.id}`,
+                before_data: JSON.stringify({ sold_at: fechaVenta }),
+                after_data: JSON.stringify({ items: preciosDistintos, total: finalTotal })
+            }, { transaction: t });
+        }
+
         await t.commit();
         notificarOrders(biz);
         notificarInventario(biz);
-        if (discountAmt > 0) notificarAudit(biz);
+        if (discountAmt > 0 || preciosDistintos.length > 0) notificarAudit(biz);
 
         const fullOrder = await cargarPedidoCompleto(order.id);
 
@@ -699,7 +765,7 @@ router.post('/:id/items', authenticate, async (req, res) => {
     const t = await sequelize.transaction();
     try {
         const biz = req.user.business_id;
-        const { items } = req.body;
+        const { items, client_uuid } = req.body;
 
         if (!items || items.length === 0) {
             await t.rollback();
@@ -719,6 +785,22 @@ router.post('/:id/items', authenticate, async (req, res) => {
         if (!order) {
             await t.rollback();
             return res.status(404).json({ error: 'Pedido no encontrado o ya cerrado' });
+        }
+
+        // Idempotencia del envío (BLOQUE 5): un doble tap con red débil duplicaba
+        // los productos de la mesa y descontaba los insumos dos veces. Si este lote
+        // ya se guardó, devolver el pedido tal como está. El SELECT es seguro
+        // porque el pedido quedó bloqueado arriba: un reenvío simultáneo espera a
+        // que el primero termine y entonces sí ve sus items.
+        if (client_uuid) {
+            const yaAgregado = await OrderItem.findOne({
+                where: { order_id: order.id, client_uuid },
+                transaction: t,
+            });
+            if (yaAgregado) {
+                await t.rollback();
+                return res.json(await cargarPedidoConItems(order.id));
+            }
         }
 
         let additionalTotal = 0;
@@ -748,6 +830,7 @@ router.post('/:id/items', authenticate, async (req, res) => {
                 unit_price: unitPrice,
                 subtotal,
                 notes: item.notes || '',
+                client_uuid: client_uuid || null,
             }, { transaction: t });
 
             await descontarIngredientesDeReceta(product.id, qty, t, order.branch_id || null);
@@ -760,13 +843,7 @@ router.post('/:id/items', authenticate, async (req, res) => {
         notificarOrders(biz);
         notificarInventario(biz);
 
-        const updated = await Order.findByPk(order.id, {
-            include: [{
-                model: OrderItem, as: 'items',
-                include: [{ model: Product, as: 'product', attributes: ['id', 'name', 'emoji', 'price'] }],
-            }],
-        });
-        res.json(updated);
+        res.json(await cargarPedidoConItems(order.id));
     } catch (error) {
         await t.rollback();
         logger.error('Add items to order error:', error);
@@ -805,13 +882,7 @@ router.delete('/:id/items/:itemId', authenticate, async (req, res) => {
 
         await t.commit();
 
-        const updated = await Order.findByPk(order.id, {
-            include: [{
-                model: OrderItem, as: 'items',
-                include: [{ model: Product, as: 'product', attributes: ['id', 'name', 'emoji', 'price'] }],
-            }],
-        });
-        res.json(updated);
+        res.json(await cargarPedidoConItems(order.id));
     } catch (error) {
         await t.rollback();
         logger.error('Delete order item error:', error);

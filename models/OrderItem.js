@@ -39,6 +39,14 @@ const OrderItem = sequelize.define('OrderItem', {
     notes: {
         type: DataTypes.TEXT,
         allowNull: true
+    },
+    // Idempotencia de "agregar productos a la mesa": uuid del LOTE que envió el
+    // cliente. Lo comparten todas las filas del mismo envío, así que NO lleva
+    // índice único — la deduplicación la hace POST /orders/:id/items dentro de la
+    // transacción, con el pedido bloqueado (ver routes/orders.js).
+    client_uuid: {
+        type: DataTypes.STRING(36),
+        allowNull: true
     }
 }, {
     tableName: 'order_items',

@@ -174,6 +174,18 @@ const runMigrations = async () => {
             console.error('❌ Error asegurando orders.client_uuid:', err.message);
         }
 
+        // Idempotencia de los items que se agregan a una mesa abierta. El uuid es
+        // del LOTE (lo comparten las filas de un mismo envío), así que el índice
+        // NO es único: solo acelera la búsqueda "¿ya guardé este envío?".
+        try {
+            await sequelize.query('ALTER TABLE order_items ADD COLUMN IF NOT EXISTS client_uuid VARCHAR(36)');
+            await sequelize.query(
+                'CREATE INDEX IF NOT EXISTS order_items_client_uuid_idx ON order_items (order_id, client_uuid)'
+            );
+        } catch (err) {
+            console.error('❌ Error asegurando order_items.client_uuid:', err.message);
+        }
+
         // Sucursal de las mesas. Antes las mesas eran del negocio entero: un local con
         // dos sucursales veía el MISMO mapa de mesas en ambas.
         try {
