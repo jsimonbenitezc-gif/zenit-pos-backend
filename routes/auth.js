@@ -4,6 +4,7 @@ const logger = require('../utils/logger');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const rateLimit = require('express-rate-limit');
+const { claveLoginPorIpYUsuario, LOGIN_MAX_INTENTOS, LOGIN_VENTANA_MS } = require('../utils/rateLimitLogin');
 const { User, sequelize } = require('../models');
 const { authenticate } = require('../middleware/auth');
 const { enviarNotificacion } = require('../utils/push');
@@ -26,11 +27,15 @@ function hashToken(token) {
     return crypto.createHash('sha256').update(token).digest('hex');
 }
 
-// Protección: máximo 10 intentos de login cada 15 minutos por IP
+// Protección: 30 intentos FALLIDOS cada 15 minutos por IP + usuario.
+// Antes era 10 por IP a secas y bloqueaba a un local entero detrás del mismo NAT.
+// Ver utils/rateLimitLogin.js para el razonamiento completo.
 const loginLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutos
-    max: 10,
-    message: { error: 'Demasiados intentos de inicio de sesión. Intenta de nuevo en 15 minutos.' },
+    windowMs: LOGIN_VENTANA_MS,
+    limit: LOGIN_MAX_INTENTOS,
+    skipSuccessfulRequests: true,
+    keyGenerator: claveLoginPorIpYUsuario,
+    message: { error: 'Demasiados intentos fallidos con este usuario. Intenta de nuevo en 15 minutos.' },
     standardHeaders: true,
     legacyHeaders: false
 });

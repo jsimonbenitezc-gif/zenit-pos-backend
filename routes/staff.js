@@ -4,6 +4,7 @@ const logger = require('../utils/logger');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const rateLimit = require('express-rate-limit');
+const { claveLoginPorIpYUsuario, LOGIN_MAX_INTENTOS, LOGIN_VENTANA_MS } = require('../utils/rateLimitLogin');
 const { User } = require('../models');
 const { authenticate, isOwner, invalidarUsuario } = require('../middleware/auth');
 const { Op } = require('sequelize');
@@ -17,11 +18,16 @@ async function generateAndSaveRefreshToken(user) {
     return emitirRefreshToken(user);
 }
 
-// Protección: máximo 10 intentos de login cada 15 minutos por IP
+// Protección: 30 intentos FALLIDOS cada 15 minutos por IP + usuario.
+// El login de empleados es el que más se usa (varios equipos, misma IP pública del
+// local): con la cuenta por IP a secas, un turno normal podía agotar el cupo.
+// Ver utils/rateLimitLogin.js.
 const loginLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 10,
-    message: { error: 'Demasiados intentos de inicio de sesión. Intenta de nuevo en 15 minutos.' },
+    windowMs: LOGIN_VENTANA_MS,
+    limit: LOGIN_MAX_INTENTOS,
+    skipSuccessfulRequests: true,
+    keyGenerator: claveLoginPorIpYUsuario,
+    message: { error: 'Demasiados intentos fallidos con este usuario. Intenta de nuevo en 15 minutos.' },
     standardHeaders: true,
     legacyHeaders: false
 });

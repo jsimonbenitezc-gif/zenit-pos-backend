@@ -1,0 +1,152 @@
+/**
+ * Bloque 6 del PLAN_ARREGLOS_V5 — puesta en producción.
+ *
+ * Cubre las partes del bloque que son código (el resto es configuración externa:
+ * Sentry, UptimeRobot, plan de Render, dominio de Resend):
+ *   1. Rate limit del login: por IP + usuario, sin castigar los logins exitosos.
+ *   2. Sentry: el cableado no usa la API que desapareció en el SDK v8
+ *      (`Sentry.Handlers`), que habría tumbado el arranque al poner SENTRY_DSN.
+ *   3. Saneado de los eventos que se mandan a Sentry (no salen contraseñas ni tokens).
+ *   4. El token del KDS dura un turno completo (12h), no 2h.
+ */
+jest.mock('../utils/push', () => ({
+    enviarNotificacion: jest.fn(),
+    getPrefs: jest.fn().mockResolvedValue({}),
+}));
+
+const fs = require('fs');
+const path = require('path');
+const request = require('supertest');
+const { app, sequelize, models, initTestDb } = require('./setup');
+const { LOGIN_MAX_INTENTOS } = require('../utils/rateLimitLogin');
+
+const PASSWORD = 'ClaveCorrecta123';
+
+// Fuente de server.js: hay piezas (Sentry, token del KDS) que viven ahí y no se
+// pueden montar en la app ligera de tests porque server.js abre el puerto.
+const fuenteServer = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+
+async function crearUsuario(username) {
+    return models.User.create({
+        username,
+        password: PASSWORD,
+        name: 'Cajero de prueba',
+        role: 'owner',
+    });
+}
+
+beforeAll(async () => {
+    await initTestDb();
+});
+
+afterAll(async () => {
+    await sequelize.close();
+});
+
+describe('Rate limit del login (Bloque 6.5)', () => {
+
+    test(`bloquea al usuario tras ${LOGIN_MAX_INTENTOS} intentos fallidos`, async () => {
+        const username = 'bloqueable@test.com';
+        await crearUsuario(username);
+
+        for (let i = 0; i < LOGIN_MAX_INTENTOS; i++) {
+            const res = await request(app)
+                .post('/api/auth/login')
+                .send({ username, password: 'incorrecta' });
+            expect(res.status).toBe(401);
+        }
+
+        const bloqueado = await request(app)
+            .post('/api/auth/login')
+            .send({ username, password: 'incorrecta' });
+        expect(bloqueado.status).toBe(429);
+    }, 120000);
+
+    test('bloquear a un usuario NO bloquea a otro desde la misma IP (el caso del local con varias cajas)', async () => {
+        // El test anterior dejó 'bloqueable@test.com' agotado desde esta misma IP.
+        const otro = 'companero@test.com';
+        await crearUsuario(otro);
+
+        const res = await request(app)
+            .post('/api/auth/login')
+            .send({ username: otro, password: 'incorrecta' });
+
+        expect(res.status).toBe(401); // pasa el limitador: la cuenta es por IP + usuario
+    }, 30000);
+
+    test('los logins exitosos no consumen cupo', async () => {
+        const username = 'trabajador@test.com';
+        await crearUsuario(username);
+
+        // Más entradas correctas que el límite: si contaran, el último sería 429.
+        for (let i = 0; i < LOGIN_MAX_INTENTOS + 5; i++) {
+            const res = await request(app)
+                .post('/api/auth/login')
+                .send({ username, password: PASSWORD });
+            expect(res.status).toBe(200);
+        }
+    }, 120000);
+});
+
+describe('Sentry (Bloque 6.1)', () => {
+
+    test('el SDK instalado expone setupExpressErrorHandler y ya NO expone Handlers', () => {
+        const Sentry = require('@sentry/node');
+        expect(typeof Sentry.setupExpressErrorHandler).toBe('function');
+        expect(Sentry.Handlers).toBeUndefined();
+    });
+
+    test('server.js no usa la API eliminada (poner SENTRY_DSN no debe tumbar el arranque)', () => {
+        expect(fuenteServer).not.toMatch(/Sentry\.Handlers/);
+        expect(fuenteServer).toMatch(/Sentry\.setupExpressErrorHandler\(app\)/);
+    });
+
+    test('server.js carga instrument.js antes que Express', () => {
+        const posInstrument = fuenteServer.indexOf("require('./instrument')");
+        const posExpress = fuenteServer.indexOf("require('express')");
+        expect(posInstrument).toBeGreaterThan(-1);
+        expect(posInstrument).toBeLessThan(posExpress);
+    });
+
+    test('sin SENTRY_DSN el monitoreo queda apagado y no rompe nada', () => {
+        const { sentryActivo } = require('../instrument');
+        expect(sentryActivo).toBe(false); // los tests corren sin DSN
+    });
+
+    test('el evento sale saneado: sin contraseñas, PIN ni tokens', () => {
+        const { sanitizarEventoSentry } = require('../instrument');
+
+        const evento = sanitizarEventoSentry({
+            request: {
+                url: 'https://api/kds?token=abc123&branch=2',
+                query_string: 'token=abc123&branch=2',
+                data: { username: 'ana@test.com', password: 'secreta', anidado: { pin: '1234' } },
+            },
+        });
+
+        expect(evento.request.data.password).toBe('[REDACTADO]');
+        expect(evento.request.data.anidado.pin).toBe('[REDACTADO]');
+        expect(evento.request.data.username).toBe('ana@test.com'); // lo no sensible se conserva
+        expect(evento.request.query_string).not.toContain('abc123');
+        expect(evento.request.url).not.toContain('abc123');
+        expect(evento.request.url).toContain('branch=2');
+    });
+
+    test('un body de texto no parseable se omite entero en vez de arriesgar una fuga', () => {
+        const { sanitizarEventoSentry } = require('../instrument');
+        const evento = sanitizarEventoSentry({ request: { data: 'password=secreta&x=1' } });
+        expect(evento.request.data).toBe('[OMITIDO]');
+    });
+});
+
+describe('Operación del piloto (Bloque 6.6)', () => {
+
+    test('el token del KDS dura un turno completo (12h)', () => {
+        expect(fuenteServer).toMatch(/expiresIn: '12h'/);
+    });
+
+    test('/health consulta la base y responde 503 si está caída (sirve para el monitor externo)', () => {
+        expect(fuenteServer).toMatch(/app\.get\('\/health'/);
+        expect(fuenteServer).toMatch(/status: 'error', database: 'disconnected'/);
+    });
+});

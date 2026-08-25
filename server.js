@@ -1,4 +1,6 @@
-require('dotenv').config();
+// Sentry primero que nada: instrumenta express/pg/http al cargarse (ver instrument.js).
+// También carga dotenv, así que las variables ya están disponibles debajo.
+const { Sentry, sentryActivo } = require('./instrument');
 
 // Validar variables de entorno obligatorias antes de arrancar
 const variablesObligatorias = ['JWT_SECRET', 'DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER', 'DB_PASSWORD'];
@@ -8,14 +10,6 @@ if (faltantes.length > 0) {
     process.exit(1);
 }
 
-const Sentry = require('@sentry/node');
-if (process.env.SENTRY_DSN) {
-    Sentry.init({
-        dsn: process.env.SENTRY_DSN,
-        environment: process.env.NODE_ENV || 'development',
-        tracesSampleRate: 0.1,
-    });
-}
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -63,10 +57,9 @@ app.use(helmet({
 // Billing (Stripe webhook necesita body sin parsear — DEBE ir antes de express.json)
 app.use('/api/billing', require('./routes/billing'));
 
-// Sentry request handler (debe ir antes de las rutas)
-if (process.env.SENTRY_DSN) {
-    app.use(Sentry.Handlers.requestHandler());
-}
+// (El SDK v8+ no necesita un requestHandler: la instrumentación de Express se
+//  engancha sola en Sentry.init(). Solo hay que registrar el handler de errores
+//  después de las rutas — más abajo.)
 
 // Límite explícito del body: las fotos viajan como data-URI base64 y el default de
 // Express (100kb) las rechazaba con un 500 genérico. Ver middleware/errorHandler.js.
@@ -181,9 +174,11 @@ app.use('/api/push',     require('./routes/push'));
 app.use('/api/exports',  require('./routes/exports'));
 app.use('/api/shopping-list', require('./routes/shoppingList'));
 
-// Sentry error handler (debe ir después de las rutas y antes de otros error handlers)
-if (process.env.SENTRY_DSN) {
-    app.use(Sentry.Handlers.errorHandler());
+// Sentry: captura de errores (después de las rutas, antes de nuestro manejador —
+// `manejadorDeErrores` responde y no llama a next(), así que si Sentry fuera después
+// no se enteraría de nada).
+if (sentryActivo) {
+    Sentry.setupExpressErrorHandler(app);
 }
 
 // Error handling (incluye el mensaje claro de "body demasiado grande" y el
@@ -204,6 +199,11 @@ syncDatabase().then(() => {
         // día NO dependen de esto — cada negocio usa su `settings.tz` (ver utils/tz.js).
         const { ZONA_DEFAULT } = require('./utils/tz');
         logger.info(`Zona del servidor: UTC${-new Date().getTimezoneOffset() / 60 >= 0 ? '+' : ''}${-new Date().getTimezoneOffset() / 60} · zona por defecto de negocios: ${ZONA_DEFAULT}`);
+        // Queda en los logs de Render para confirmar de un vistazo si el monitoreo
+        // está encendido (sin esto, "no llegan errores" y "no está configurado" se ven igual).
+        logger.info(sentryActivo
+            ? `Sentry ACTIVO (entorno: ${process.env.NODE_ENV || 'development'})`
+            : 'Sentry desactivado (falta SENTRY_DSN)');
     });
     iniciarCronJobs();
 });
