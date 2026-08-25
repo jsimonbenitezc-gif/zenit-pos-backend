@@ -139,6 +139,45 @@ describe('Sentry (Bloque 6.1)', () => {
     });
 });
 
+describe('Puente logger → Sentry (Bloque 6.1)', () => {
+
+    const { conectarASentry } = require('../utils/logger');
+
+    function loggerFalso() {
+        const escritos = [];
+        return { escritos, error: (m, meta) => escritos.push([m, meta]) };
+    }
+
+    test('un error atrapado por una ruta (logger.error) llega a Sentry', () => {
+        const sentry = { captureException: jest.fn(), captureMessage: jest.fn() };
+        const log = conectarASentry(loggerFalso(), sentry);
+        const fallo = new Error('la base no responde');
+
+        log.error('Error al obtener empleados:', fallo);
+
+        expect(sentry.captureException).toHaveBeenCalledWith(fallo);
+        expect(log.escritos).toHaveLength(1); // y se sigue escribiendo en los logs
+    });
+
+    test('un error sin objeto Error se manda como mensaje, no se pierde', () => {
+        const sentry = { captureException: jest.fn(), captureMessage: jest.fn() };
+        const log = conectarASentry(loggerFalso(), sentry);
+
+        log.error('POST /api/orders → algo salió mal', { stack: '...' });
+
+        expect(sentry.captureMessage).toHaveBeenCalled();
+        expect(sentry.captureException).not.toHaveBeenCalled();
+    });
+
+    test('si Sentry falla, el log se escribe igual', () => {
+        const sentry = { captureException: () => { throw new Error('sentry caído'); }, captureMessage: jest.fn() };
+        const log = conectarASentry(loggerFalso(), sentry);
+
+        expect(() => log.error('x', new Error('y'))).not.toThrow();
+        expect(log.escritos).toHaveLength(1);
+    });
+});
+
 describe('Operación del piloto (Bloque 6.6)', () => {
 
     test('el token del KDS dura un turno completo (12h)', () => {
