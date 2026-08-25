@@ -73,7 +73,11 @@ if (sentryActivo) {
     Sentry.init({
         dsn: DSN,
         environment: process.env.NODE_ENV || 'development',
-        tracesSampleRate: 0.1,
+        // Trazas de rendimiento APAGADAS por defecto: en el proyecto de Sentry solo
+        // se activó "Error monitoring", así que los spans se enviarían para nada — y
+        // el instrumental de OpenTelemetry cuesta CPU y memoria, que en el plan free
+        // de Render son escasas. Para encenderlas: SENTRY_TRACES_SAMPLE_RATE=0.1
+        tracesSampleRate: Number(process.env.SENTRY_TRACES_SAMPLE_RATE ?? 0),
         // No adjuntar IP, cookies ni headers del usuario.
         sendDefaultPii: false,
         beforeSend: sanitizarEventoSentry,
