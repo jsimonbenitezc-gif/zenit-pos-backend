@@ -317,6 +317,23 @@ const runMigrations = async () => {
             console.error('❌ Error asegurando movimientos de caja:', err.message);
         }
 
+        // Impuesto configurable (BLOQUE 8). `sequelize.sync()` no toca tablas
+        // existentes, así que las columnas se aseguran aquí (§19.4: Render
+        // arranca con `node server.js` y las migraciones CLI no corren).
+        // Los pedidos ya existentes quedan con subtotal NULL a propósito: su
+        // total ES lo que se cobró y nadie sabe cuánto de eso era impuesto.
+        // `tax_amount` sí se rellena con 0 (DEFAULT), que es la verdad: hasta
+        // hoy no se cobraba impuesto desglosado.
+        try {
+            await sequelize.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS subtotal NUMERIC(10,2)');
+            await sequelize.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS tax_amount NUMERIC(10,2) DEFAULT 0');
+            await sequelize.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS tax_rate NUMERIC(5,2)');
+            await sequelize.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS tax_included BOOLEAN');
+            await sequelize.query('ALTER TABLE turnos ADD COLUMN IF NOT EXISTS total_impuesto NUMERIC(10,2) DEFAULT 0');
+        } catch (err) {
+            console.error('❌ Error asegurando columnas de impuesto:', err.message);
+        }
+
         // products.image y categories.image deben ser TEXT para guardar data URIs
         // base64 (~15-40KB). Sin esto quedan en VARCHAR(255) y el INSERT falla con
         // "value too long", perdiendo la foto. La migración CLI equivalente

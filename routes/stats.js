@@ -61,7 +61,11 @@ router.get('/dashboard', authenticate, async (req, res) => {
             attributes: [
                 [sequelize.fn('COUNT', sequelize.col('id')), 'total_pedidos'],
                 [sequelize.fn('COALESCE', sequelize.fn('SUM', sequelize.col('total')), 0), 'monto_total'],
-                [sequelize.fn('COALESCE', sequelize.fn('AVG', sequelize.col('total')), 0), 'ticket_promedio']
+                [sequelize.fn('COALESCE', sequelize.fn('AVG', sequelize.col('total')), 0), 'ticket_promedio'],
+                // BLOQUE 8 — Impuesto recaudado hoy. Se agrega como línea aparte:
+                // `monto_total` sigue siendo lo COBRADO (el número que el dueño ya
+                // conoce), y de ahí se deriva cuánto es suyo y cuánto del fisco.
+                [sequelize.fn('COALESCE', sequelize.fn('SUM', sequelize.col('tax_amount')), 0), 'impuesto_total']
             ],
             raw: true
         });
@@ -290,7 +294,11 @@ router.get('/dashboard', authenticate, async (req, res) => {
             ventasHoy: {
                 monto_total: parseFloat(ventasHoy[0].monto_total) || 0,
                 total_pedidos: parseInt(ventasHoy[0].total_pedidos) || 0,
-                ticket_promedio: parseFloat(ventasHoy[0].ticket_promedio) || 0
+                ticket_promedio: parseFloat(ventasHoy[0].ticket_promedio) || 0,
+                impuesto_total: parseFloat(ventasHoy[0].impuesto_total) || 0,
+                monto_neto: parseFloat(
+                    ((parseFloat(ventasHoy[0].monto_total) || 0) - (parseFloat(ventasHoy[0].impuesto_total) || 0)).toFixed(2)
+                )
             },
             ventasAyer: {
                 monto_total: parseFloat(ventasAyer[0]?.monto_total) || 0,

@@ -69,6 +69,30 @@ const Order = sequelize.define('Order', {
         allowNull: true,
         defaultValue: 0
     },
+    // ── Impuesto (BLOQUE 8) ──────────────────────────────────────────────
+    // Invariante: total = subtotal + tax_amount.
+    //   • subtotal   = base gravable (suma de items − descuentos)
+    //   • tax_rate / tax_included quedan CONGELADOS con el valor que tenía el
+    //     negocio al cobrar: reimprimir un ticket viejo o recalcular una mesa
+    //     abierta no debe usar la tasa de hoy si el dueño la cambió después.
+    // Un pedido anterior al bloque tiene subtotal NULL: ahí el total ES lo cobrado.
+    subtotal: {
+        type: DataTypes.DECIMAL(10, 2),
+        allowNull: true
+    },
+    tax_amount: {
+        type: DataTypes.DECIMAL(10, 2),
+        allowNull: true,
+        defaultValue: 0
+    },
+    tax_rate: {
+        type: DataTypes.DECIMAL(5, 2),
+        allowNull: true
+    },
+    tax_included: {
+        type: DataTypes.BOOLEAN,
+        allowNull: true
+    },
     created_by: {
         type: DataTypes.INTEGER,
         allowNull: true,

@@ -62,7 +62,10 @@ router.get('/sales', authenticate, async (req, res) => {
             order: [['createdAt', 'ASC']],
         });
 
-        const headers = ['Fecha', 'Hora', 'Numero de Pedido', 'Productos', 'Total', 'Metodo de Pago', 'Empleado'];
+        // Subtotal e impuesto van en el CSV porque este archivo es el que el dueño
+        // le pasa al contador (BLOQUE 8). Un pedido anterior al bloque no tiene
+        // subtotal: ahí el total ES la base, y el impuesto es 0.
+        const headers = ['Fecha', 'Hora', 'Numero de Pedido', 'Productos', 'Subtotal', 'Impuesto', 'Total', 'Metodo de Pago', 'Empleado'];
         const rows = orders.map(o => {
             const fecha = new Date(o.createdAt);
             const productos = (o.items || []).map(i => {
@@ -74,6 +77,8 @@ router.get('/sales', authenticate, async (req, res) => {
                 fecha.toTimeString().split(' ')[0],
                 o.id,
                 productos,
+                parseFloat(o.subtotal ?? o.total).toFixed(2),
+                parseFloat(o.tax_amount || 0).toFixed(2),
                 parseFloat(o.total).toFixed(2),
                 o.payment_method || '',
                 o.creator ? o.creator.name : '',

@@ -63,6 +63,14 @@ const Turno = sequelize.define('Turno', {
         type: DataTypes.DECIMAL(10, 2),
         defaultValue: 0
     },
+    // Impuesto recaudado en el turno (BLOQUE 8). Se congela igual que los
+    // movimientos: es la cifra que el dueño leyó en ese corte. NO cambia el
+    // efectivo esperado (el impuesto se cobra dentro del total y está en el
+    // cajón); es informativo para el administrador.
+    total_impuesto: {
+        type: DataTypes.DECIMAL(10, 2),
+        defaultValue: 0
+    },
     // Movimientos de caja del turno (BLOQUE 7). Se congelan al cerrar para que el
     // reporte de un turno viejo no cambie si después se anula un movimiento.
     total_depositos: {

@@ -6,6 +6,7 @@ const { authenticate } = require('../middleware/auth');
 const { verifyEmployeePin } = require('../utils/verifyPin');
 const { resolverBranchId, BranchError } = require('../utils/branch');
 const { resolverFechaVenta, resolverPrecioUnitario, precioDifiere } = require('../utils/ventaOffline');
+const { desglosar, baseParaRecalcular, resolverImpuestoVenta, configImpuestoNegocio } = require('../utils/impuestos');
 const { Op } = require('sequelize');
 const { notificarAudit } = require('./audit');
 const { enviarNotificacion, getPrefs } = require('../utils/push');
@@ -621,12 +622,33 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
             loyaltyAmt = parseFloat(Math.max(loyaltyAmt, 0).toFixed(2));
         }
 
-        const finalTotal = parseFloat((calculatedTotal - discountAmt - loyaltyAmt).toFixed(2));
+        // IMPUESTO (BLOQUE 8). El descuento y el canje de puntos bajan la BASE
+        // GRAVABLE: se descuentan primero y el impuesto se calcula sobre lo que
+        // realmente se cobró. Con tasa 0 (el default) `desglosar` devuelve el
+        // mismo total de siempre, así que un negocio sin impuesto no ve cambio.
+        const baseGravable = parseFloat((calculatedTotal - discountAmt - loyaltyAmt).toFixed(2));
+        const configImpuesto = resolverImpuestoVenta(
+            await configImpuestoNegocio(biz),
+            req.body,
+            esVentaDiferida
+        );
+        const desglose = desglosar({
+            base: baseGravable,
+            tasa: configImpuesto.tasa,
+            incluido: configImpuesto.incluido
+        });
+        const finalTotal = desglose.total;
 
         const order = await Order.create({
             customer_id,
             customer_temp_info,
             total: finalTotal,
+            subtotal: desglose.subtotal,
+            tax_amount: desglose.impuesto,
+            // Congelados: la tasa con la que se cobró ESTE ticket. Si el dueño la
+            // cambia mañana, la mesa abierta y la reimpresión siguen cuadrando.
+            tax_rate: configImpuesto.tasa,
+            tax_included: configImpuesto.incluido,
             // Descuento total aplicado a la venta (empleado/promo + canje de puntos),
             // para que tickets y reportes muestren lo que realmente se descontó.
             discount_amount: parseFloat((discountAmt + loyaltyAmt).toFixed(2)),
@@ -836,8 +858,22 @@ router.post('/:id/items', authenticate, async (req, res) => {
             await descontarIngredientesDeReceta(product.id, qty, t, order.branch_id || null);
         }
 
-        const newTotal = parseFloat((parseFloat(order.total) + additionalTotal).toFixed(2));
-        await order.update({ total: newTotal }, { transaction: t });
+        // El impuesto de la mesa se recalcula con la tasa CONGELADA del pedido,
+        // no con la de hoy: si el dueño cambió el IVA a media comida, la cuenta
+        // que el cliente ya vio no se mueve. `baseParaRecalcular` sabe qué
+        // columna es el acumulador en cada modo (subtotal en AGREGADO, total en
+        // INCLUIDO); sumarle el producto a la equivocada descuadra la mesa.
+        const nuevaBase = parseFloat((baseParaRecalcular(order) + additionalTotal).toFixed(2));
+        const desgloseMesa = desglosar({
+            base: nuevaBase,
+            tasa: order.tax_rate,
+            incluido: order.tax_included
+        });
+        await order.update({
+            total:      desgloseMesa.total,
+            subtotal:   desgloseMesa.subtotal,
+            tax_amount: desgloseMesa.impuesto
+        }, { transaction: t });
 
         await t.commit();
         notificarOrders(biz);
@@ -877,8 +913,17 @@ router.delete('/:id/items/:itemId', authenticate, async (req, res) => {
 
         await item.destroy({ transaction: t });
 
-        const newTotal = parseFloat((parseFloat(order.total) - parseFloat(item.subtotal)).toFixed(2));
-        await order.update({ total: Math.max(0, newTotal) }, { transaction: t });
+        const baseRestante = Math.max(0, parseFloat((baseParaRecalcular(order) - parseFloat(item.subtotal)).toFixed(2)));
+        const desgloseMesa = desglosar({
+            base: baseRestante,
+            tasa: order.tax_rate,
+            incluido: order.tax_included
+        });
+        await order.update({
+            total:      desgloseMesa.total,
+            subtotal:   desgloseMesa.subtotal,
+            tax_amount: desgloseMesa.impuesto
+        }, { transaction: t });
 
         await t.commit();
 

@@ -8,6 +8,7 @@ const { User } = require('../models');
 const { authenticate } = require('../middleware/auth');
 const { configurarSSE } = require('../utils/sse');
 const { zonaValida, invalidarZonaNegocio } = require('../utils/tz');
+const { normalizarTasa, normalizarNombre, invalidarImpuestoNegocio, NOMBRE_MAX } = require('../utils/impuestos');
 
 // Protección: máximo 10 intentos de verificación de PIN por minuto por IP
 const pinLimiter = rateLimit({
@@ -64,6 +65,9 @@ router.put('/', authenticate, async (req, res) => {
             'logo_base64',
             'venta_sin_turno',
             'movimientos_caja_pin',
+            // Impuesto configurable (BLOQUE 8): interruptor, tasa en %, si el
+            // precio ya lo incluye y cómo se llama en el ticket (IVA, ITBIS...).
+            'tax_enabled', 'tax_rate', 'tax_included', 'tax_name',
             'puntos_activos', 'puntos_por_peso', 'puntos_bono_pedido', 'puntos_valor',
             'permisos_roles',
             'sucursal_id',
@@ -96,6 +100,39 @@ router.put('/', authenticate, async (req, res) => {
             return res.status(403).json({ error: 'Solo el administrador puede cambiar si los movimientos de caja piden PIN' });
         }
 
+        // El impuesto cambia lo que se le COBRA al cliente, así que es una decisión
+        // del dueño, no del cajero que tiene la caja enfrente. Mismo criterio que
+        // el PIN de movimientos: el backend lee la config del owner, de modo que
+        // un empleado que la cambiara en sus propios settings no lograría nada.
+        const CLAVES_IMPUESTO = ['tax_enabled', 'tax_rate', 'tax_included', 'tax_name'];
+        const tocaImpuesto = CLAVES_IMPUESTO.some(k => k in incoming);
+        if (tocaImpuesto && req.user.id !== req.user.business_id) {
+            return res.status(403).json({ error: 'Solo el administrador puede cambiar la configuración de impuestos' });
+        }
+        // La tasa se guarda tal cual y se usa para cobrar: un valor basura cobraría
+        // de más a clientes reales, así que se rechaza en vez de caer a un default.
+        if ('tax_rate' in incoming) {
+            const tasa = normalizarTasa(incoming.tax_rate);
+            if (tasa === null) {
+                return res.status(400).json({ error: 'La tasa de impuesto debe ser un número entre 0 y 100' });
+            }
+            incoming.tax_rate = tasa;
+        }
+        if ('tax_included' in incoming) {
+            incoming.tax_included = incoming.tax_included === true || incoming.tax_included === 'true';
+        }
+        // El interruptor apaga el impuesto SIN borrar la tasa: el negocio que lo
+        // apaga temporalmente no debería tener que volver a teclear su 16%.
+        if ('tax_enabled' in incoming) {
+            incoming.tax_enabled = incoming.tax_enabled === true || incoming.tax_enabled === 'true';
+        }
+        if ('tax_name' in incoming) {
+            if (typeof incoming.tax_name !== 'string' || incoming.tax_name.trim().length > NOMBRE_MAX) {
+                return res.status(400).json({ error: `El nombre del impuesto no puede pasar de ${NOMBRE_MAX} caracteres` });
+            }
+            incoming.tax_name = normalizarNombre(incoming.tax_name);
+        }
+
         // La zona horaria se interpola en SQL (stats agrupa por fecha local), así que
         // se rechaza cualquier valor que no sea una zona IANA real.
         if ('tz' in incoming && !zonaValida(incoming.tz)) {
@@ -105,6 +142,7 @@ router.put('/', authenticate, async (req, res) => {
         const updated = { ...current, ...incoming };
         await user.update({ settings: JSON.stringify(updated) });
         if ('tz' in incoming) invalidarZonaNegocio(req.user.business_id);
+        if (tocaImpuesto) invalidarImpuestoNegocio(req.user.business_id);
         // Notificar a todos los dispositivos conectados del mismo negocio
         _notificarSettings(req.user.business_id);
         res.json(updated);

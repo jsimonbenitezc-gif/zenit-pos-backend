@@ -232,13 +232,15 @@ async function _ventasDelTurno(turno, hasta = null) {
                 : { [Op.gte]: turno.apertura },
             ...(await filtroSucursalTurno(turno))
         },
-        attributes: ['id', 'total', 'payment_method']
+        attributes: ['id', 'total', 'payment_method', 'tax_amount']
     });
 
     let totalVentas = 0, totalEfectivo = 0, totalTarjeta = 0, totalTransferencia = 0;
+    let totalImpuesto = 0;
     for (const p of pedidos) {
         const t = parseFloat(p.total) || 0;
         totalVentas += t;
+        totalImpuesto += parseFloat(p.tax_amount) || 0;
         const metodo = (p.payment_method || '').toLowerCase();
         if (metodo === 'tarjeta' || metodo === 'card') {
             totalTarjeta += t;
@@ -249,12 +251,19 @@ async function _ventasDelTurno(turno, hasta = null) {
         }
     }
 
+    // BLOQUE 8 — El impuesto va DENTRO del total cobrado, así que no cambia ni el
+    // efectivo esperado ni el corte: es informativo para el administrador, que es
+    // el único a quien le sirve saber cuánto de la caja es impuesto recaudado.
+    const impuesto = parseFloat(totalImpuesto.toFixed(2));
     return {
         total_pedidos:       pedidos.length,
         total_ventas:        parseFloat(totalVentas.toFixed(2)),
         total_efectivo:      parseFloat(totalEfectivo.toFixed(2)),
         total_tarjeta:       parseFloat(totalTarjeta.toFixed(2)),
-        total_transferencia: parseFloat(totalTransferencia.toFixed(2))
+        total_transferencia: parseFloat(totalTransferencia.toFixed(2)),
+        total_impuesto:      impuesto,
+        // Lo que se queda el negocio, ya sin el impuesto que le corresponde al fisco.
+        total_ventas_netas:  parseFloat((totalVentas - impuesto).toFixed(2))
     };
 }
 
@@ -322,6 +331,7 @@ router.put('/:id/cerrar', authenticate, async (req, res) => {
             total_efectivo:     ventas.total_efectivo,
             total_tarjeta:      ventas.total_tarjeta,
             total_transferencia: ventas.total_transferencia,
+            total_impuesto:     ventas.total_impuesto,
             // Congelados: el reporte de un turno cerrado no debe cambiar si alguien
             // anula un movimiento después.
             total_depositos:    movs.total_depositos,

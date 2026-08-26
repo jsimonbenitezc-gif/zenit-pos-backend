@@ -16,6 +16,7 @@ const models = require('../models');
 
 const { manejadorDeErrores, LIMITE_BODY } = require('../middleware/errorHandler');
 const { limpiarCacheUsuarios } = require('../middleware/auth');
+const { limpiarCacheImpuestos } = require('../utils/impuestos');
 
 // ── App Express ligera (sin Sentry, CORS, helmet, cron) ──
 // El límite del body y el manejador de errores son los MISMOS que en server.js,
@@ -60,8 +61,10 @@ async function initTestDb() {
     await sequelize.sync({ force: true });
 
     // `force: true` reinicia los autoincrement: sin esto, un id reutilizado podría
-    // leer datos cacheados del usuario anterior (caché de middleware/auth.js).
+    // leer datos cacheados del usuario anterior (cachés de middleware/auth.js y
+    // utils/impuestos.js, ambas indexadas por id).
     limpiarCacheUsuarios();
+    limpiarCacheImpuestos();
 }
 
 // ── Helper: crear usuario owner con JWT ──────────────────
