@@ -63,6 +63,7 @@ router.put('/', authenticate, async (req, res) => {
             'show_website', 'show_instagram', 'show_rfc',
             'logo_base64',
             'venta_sin_turno',
+            'movimientos_caja_pin',
             'puntos_activos', 'puntos_por_peso', 'puntos_bono_pedido', 'puntos_valor',
             'permisos_roles',
             'sucursal_id',
@@ -84,6 +85,15 @@ router.put('/', authenticate, async (req, res) => {
         const incoming = {};
         for (const key of ALLOWED_KEYS) {
             if (key in req.body) incoming[key] = req.body[key];
+        }
+
+        // Pedir PIN para los movimientos de caja es una decisión del DUEÑO, no del
+        // cajero que tiene el equipo enfrente. El backend lee esta preferencia del
+        // owner (getPrefs(business_id)), así que un empleado que la apagara en sus
+        // propios settings no cambiaría nada; se rechaza explícito para no dejar una
+        // UI que parezca funcionar y no haga efecto.
+        if ('movimientos_caja_pin' in incoming && req.user.id !== req.user.business_id) {
+            return res.status(403).json({ error: 'Solo el administrador puede cambiar si los movimientos de caja piden PIN' });
         }
 
         // La zona horaria se interpola en SQL (stats agrupa por fecha local), así que

@@ -32,6 +32,9 @@ const Table = require('./Table');
 // Turnos
 const Turno = require('./Turno');
 
+// Movimientos de caja (retiros, gastos, depósitos durante el turno)
+const CashMovement = require('./CashMovement');
+
 // Auditoría de acciones privilegiadas
 const PrivilegedActionLog = require('./PrivilegedActionLog');
 
@@ -65,6 +68,7 @@ const models = {
     BranchStock,
     Table,
     Turno,
+    CashMovement,
     PrivilegedActionLog,
     ProcessedWebhook,
     ShoppingList,
@@ -148,6 +152,10 @@ const setupRelations = () => {
 
     // ShoppingList <-> Branch
     models.ShoppingList.belongsTo(models.Branch, { foreignKey: 'branch_id', as: 'branch' });
+
+    // Turno <-> CashMovement (movimientos de caja del turno)
+    models.Turno.hasMany(models.CashMovement, { foreignKey: 'turno_id', as: 'movimientos' });
+    models.CashMovement.belongsTo(models.Turno, { foreignKey: 'turno_id', as: 'turno' });
 
     // User <-> RefreshToken (una fila por sesión/dispositivo)
     models.User.hasMany(models.RefreshToken, { foreignKey: 'user_id', as: 'refreshTokens', onDelete: 'CASCADE' });
@@ -286,6 +294,27 @@ const runMigrations = async () => {
             );
         } catch (err) {
             console.error('❌ Error asegurando customers_business_phone_unique:', err.message);
+        }
+
+        // Movimientos de caja (BLOQUE 7). `sequelize.sync()` crea la tabla si no
+        // existe, pero no toca las tablas existentes: los totales que quedan
+        // congelados en el turno cerrado y los índices se aseguran aquí
+        // (ver CLAUDE.md §19.4: Render arranca con `node server.js`).
+        try {
+            for (const col of ['total_depositos', 'total_retiros', 'total_gastos']) {
+                await sequelize.query(
+                    `ALTER TABLE turnos ADD COLUMN IF NOT EXISTS ${col} NUMERIC(10,2) DEFAULT 0`
+                );
+            }
+            await sequelize.query(
+                'CREATE INDEX IF NOT EXISTS cash_movements_turno_idx ON cash_movements (turno_id)'
+            );
+            // Idempotencia: un reintento por timeout de red no debe duplicar el retiro.
+            await sequelize.query(
+                'CREATE UNIQUE INDEX IF NOT EXISTS cash_movements_client_uuid_uq ON cash_movements (client_uuid) WHERE client_uuid IS NOT NULL'
+            );
+        } catch (err) {
+            console.error('❌ Error asegurando movimientos de caja:', err.message);
         }
 
         // products.image y categories.image deben ser TEXT para guardar data URIs

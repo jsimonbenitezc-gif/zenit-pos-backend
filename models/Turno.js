@@ -63,6 +63,20 @@ const Turno = sequelize.define('Turno', {
         type: DataTypes.DECIMAL(10, 2),
         defaultValue: 0
     },
+    // Movimientos de caja del turno (BLOQUE 7). Se congelan al cerrar para que el
+    // reporte de un turno viejo no cambie si después se anula un movimiento.
+    total_depositos: {
+        type: DataTypes.DECIMAL(10, 2),
+        defaultValue: 0
+    },
+    total_retiros: {
+        type: DataTypes.DECIMAL(10, 2),
+        defaultValue: 0
+    },
+    total_gastos: {
+        type: DataTypes.DECIMAL(10, 2),
+        defaultValue: 0
+    },
     notas: {
         type: DataTypes.TEXT,
         allowNull: true

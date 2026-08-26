@@ -1,3 +1,5 @@
+const crypto = require('crypto');
+const bcrypt = require('bcrypt');
 const { User } = require('../models');
 
 /**
@@ -35,4 +37,76 @@ async function verifyEmployeePin(employee_id, pin, business_id) {
     return employee;
 }
 
-module.exports = { verifyEmployeePin };
+/**
+ * Verifica el PIN de un PUESTO (cajero, encargado, dueño) contra
+ * `settings.permisos_roles` del dueño del negocio.
+ *
+ * ⚠️ Esto NO es lo mismo que `verifyEmployeePin`. Zenit tiene DOS credenciales
+ * distintas y confundirlas deja funciones muertas:
+ *   - PIN de PERFIL: 4-8 dígitos guardados (hasheados) en los ajustes del negocio.
+ *     Es lo único que el cajero teclea en el desktop y en el mobile, porque los
+ *     puestos son roles compartidos, no cuentas de usuario.
+ *   - Contraseña de CUENTA (`verifyEmployeePin`): la de un `User` real con email.
+ *     Solo existe para el dueño y para el staff dado de alta en /api/staff.
+ *
+ * Acepta bcrypt (`pin_bcrypt`) y el SHA256 legacy que genera el desktop; cuando
+ * valida por SHA256 devuelve el objeto de settings ya migrado a bcrypt para que
+ * el llamador lo persista.
+ *
+ * @param {object} opts
+ * @param {number} opts.businessId  id del dueño (req.user.business_id)
+ * @param {string} opts.role        'cajero' | 'encargado' | 'dueno' | ...
+ * @param {string} opts.pin
+ * @param {number|null=} opts.branchId  sucursal, para los permisos con sufijo __b_
+ * @returns {Promise<{valid:boolean, settingsMigrados:object|null, ownerId:number|null}>}
+ */
+async function verificarPinDePerfil({ businessId, role, pin, branchId = null }) {
+    const vacio = { valid: false, settingsMigrados: null, ownerId: null };
+    if (!role || !pin) return vacio;
+
+    const owner = await User.findByPk(businessId, { attributes: ['id', 'settings'] });
+    if (!owner) return vacio;
+
+    let settings = {};
+    try { settings = owner.settings ? JSON.parse(owner.settings) : {}; } catch { return vacio; }
+    const permisosRoles = settings.permisos_roles || {};
+
+    // Los permisos pueden estar personalizados por sucursal (sufijo __b_{id}).
+    let permisos = permisosRoles;
+    const claveSucursal = branchId ? `__b_${branchId}` : null;
+    if (claveSucursal && permisosRoles[claveSucursal]?.[role]) {
+        permisos = permisosRoles[claveSucursal];
+    } else {
+        const globales = Object.fromEntries(
+            Object.entries(permisosRoles).filter(([k]) => !k.startsWith('__b_'))
+        );
+        if (globales[role]) {
+            permisos = globales;
+        } else {
+            // Último recurso: buscar el puesto en cualquier sucursal.
+            for (const bk of Object.keys(permisosRoles).filter(k => k.startsWith('__b_'))) {
+                if (permisosRoles[bk]?.[role]) { permisos = permisosRoles[bk]; break; }
+            }
+        }
+    }
+
+    const rolData = permisos[role];
+    if (!rolData || !rolData.pin_set) return { ...vacio, ownerId: owner.id };
+
+    if (rolData.pin_bcrypt) {
+        const valid = await bcrypt.compare(pin, rolData.pin_bcrypt);
+        return { valid, settingsMigrados: null, ownerId: owner.id };
+    }
+
+    if (rolData.pin) {
+        const sha256 = crypto.createHash('sha256').update(pin).digest('hex');
+        if (sha256 !== rolData.pin) return { ...vacio, ownerId: owner.id };
+        // Migración automática a bcrypt: el llamador persiste `settingsMigrados`.
+        rolData.pin_bcrypt = await bcrypt.hash(pin, 10);
+        return { valid: true, settingsMigrados: settings, ownerId: owner.id };
+    }
+
+    return { ...vacio, ownerId: owner.id };
+}
+
+module.exports = { verifyEmployeePin, verificarPinDePerfil };
