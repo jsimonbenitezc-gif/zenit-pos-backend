@@ -11,6 +11,7 @@ const { enviarNotificacion, getPrefs } = require('../utils/push');
 const { verifyEmployeePin, verificarPinDePerfil } = require('../utils/verifyPin');
 const { User } = require('../models');
 const { TIPOS, totalesMovimientos, efectivoEsperado, montoValido } = require('../utils/cashMovements');
+const { totalesPropinas } = require('../utils/propinas');
 
 // ── Movimientos de caja (BLOQUE 7) ──────────────────────────────────────────
 // Sacar efectivo del cajón es una acción de dinero, igual que un descuento: pide
@@ -232,7 +233,7 @@ async function _ventasDelTurno(turno, hasta = null) {
                 : { [Op.gte]: turno.apertura },
             ...(await filtroSucursalTurno(turno))
         },
-        attributes: ['id', 'total', 'payment_method', 'tax_amount']
+        attributes: ['id', 'total', 'payment_method', 'tax_amount', 'tip_amount', 'tip_method']
     });
 
     let totalVentas = 0, totalEfectivo = 0, totalTarjeta = 0, totalTransferencia = 0;
@@ -255,6 +256,13 @@ async function _ventasDelTurno(turno, hasta = null) {
     // efectivo esperado ni el corte: es informativo para el administrador, que es
     // el único a quien le sirve saber cuánto de la caja es impuesto recaudado.
     const impuesto = parseFloat(totalImpuesto.toFixed(2));
+
+    // BLOQUE 9 — Las propinas van APARTE de las ventas: no son ingreso del
+    // negocio y no deben inflar `total_ventas` ni los totales por método de pago.
+    // Se separan por método porque solo la de efectivo está en el cajón; es la
+    // única que el efectivo esperado le exige al cajero (ver utils/propinas.js).
+    const propinas = totalesPropinas(pedidos);
+
     return {
         total_pedidos:       pedidos.length,
         total_ventas:        parseFloat(totalVentas.toFixed(2)),
@@ -263,7 +271,8 @@ async function _ventasDelTurno(turno, hasta = null) {
         total_transferencia: parseFloat(totalTransferencia.toFixed(2)),
         total_impuesto:      impuesto,
         // Lo que se queda el negocio, ya sin el impuesto que le corresponde al fisco.
-        total_ventas_netas:  parseFloat((totalVentas - impuesto).toFixed(2))
+        total_ventas_netas:  parseFloat((totalVentas - impuesto).toFixed(2)),
+        ...propinas
     };
 }
 
@@ -284,7 +293,8 @@ router.get('/:id/totales', authenticate, async (req, res) => {
             // El número que el cajero debe encontrar en el cajón al contar.
             efectivo_esperado: efectivoEsperado({
                 fondoInicial:   turno.fondo_inicial,
-                ventasEfectivo: ventas.total_efectivo,
+                ventasEfectivo:    ventas.total_efectivo,
+                propinasEfectivo:  ventas.total_propinas_efectivo,
                 movimientos:    movs
             })
         });
@@ -316,7 +326,8 @@ router.put('/:id/cerrar', authenticate, async (req, res) => {
         // aparecía como un faltante y la "diferencia" dejaba de significar algo.
         const esperado   = efectivoEsperado({
             fondoInicial:   turno.fondo_inicial,
-            ventasEfectivo: ventas.total_efectivo,
+            ventasEfectivo:    ventas.total_efectivo,
+            propinasEfectivo:  ventas.total_propinas_efectivo,
             movimientos:    movs
         });
         const diferencia = efectivo - esperado;
@@ -337,6 +348,12 @@ router.put('/:id/cerrar', authenticate, async (req, res) => {
             total_depositos:    movs.total_depositos,
             total_retiros:      movs.total_retiros,
             total_gastos:       movs.total_gastos,
+            // BLOQUE 9 — Propinas, congeladas igual que lo demás. No están dentro
+            // de `total_ventas`: son dinero del cliente para el empleado.
+            total_propinas:               ventas.total_propinas,
+            total_propinas_efectivo:      ventas.total_propinas_efectivo,
+            total_propinas_tarjeta:       ventas.total_propinas_tarjeta,
+            total_propinas_transferencia: ventas.total_propinas_transferencia,
             notas:              notas || null
         });
 

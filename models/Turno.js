@@ -85,6 +85,27 @@ const Turno = sequelize.define('Turno', {
         type: DataTypes.DECIMAL(10, 2),
         defaultValue: 0
     },
+    // Propinas del turno (BLOQUE 9). Se congelan igual que lo anterior.
+    // ⚠️ NO son ventas: `total_ventas` no las incluye. Se guardan separadas por
+    // método porque solo la de EFECTIVO está en el cajón y por tanto es la única
+    // que el efectivo esperado le exige al cajero al contar; la de tarjeta llega
+    // después en la liquidación del banco. Ver utils/propinas.js.
+    total_propinas: {
+        type: DataTypes.DECIMAL(10, 2),
+        defaultValue: 0
+    },
+    total_propinas_efectivo: {
+        type: DataTypes.DECIMAL(10, 2),
+        defaultValue: 0
+    },
+    total_propinas_tarjeta: {
+        type: DataTypes.DECIMAL(10, 2),
+        defaultValue: 0
+    },
+    total_propinas_transferencia: {
+        type: DataTypes.DECIMAL(10, 2),
+        defaultValue: 0
+    },
     notas: {
         type: DataTypes.TEXT,
         allowNull: true

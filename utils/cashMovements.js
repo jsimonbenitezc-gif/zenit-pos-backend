@@ -48,18 +48,29 @@ async function totalesMovimientos(turnoId, { transaction = null } = {}) {
 /**
  * Efectivo que DEBERÍA haber en el cajón al cerrar.
  *
- *   esperado = fondo_inicial + ventas_efectivo + depósitos − retiros − gastos
+ *   esperado = fondo_inicial + ventas_efectivo + propinas_efectivo
+ *              + depósitos − retiros − gastos
+ *
+ * ⚠️ BLOQUE 9 — La propina en EFECTIVO está físicamente en el cajón, así que
+ * cuenta. Si no se sumara, cada propina en efectivo aparecería como un SOBRANTE
+ * y la "diferencia" del corte volvería a mezclar errores de conteo con dinero
+ * legítimo — el mismo problema que resolvió el BLOQUE 7 con los gastos.
+ * La propina en TARJETA no entra: llega en la liquidación del banco, no al cajón.
+ * Cuando la propina se le entrega al empleado sale como un `retiro`, que esta
+ * misma fórmula ya resta.
  *
  * @param {object} opts
  * @param {number} opts.fondoInicial
  * @param {number} opts.ventasEfectivo
+ * @param {number=} opts.propinasEfectivo  propinas cobradas en efectivo (0 si no hay)
  * @param {{neto:number}} opts.movimientos  resultado de totalesMovimientos()
  * @returns {number}
  */
-function efectivoEsperado({ fondoInicial, ventasEfectivo, movimientos }) {
+function efectivoEsperado({ fondoInicial, ventasEfectivo, propinasEfectivo = 0, movimientos }) {
     return redondear(
         (parseFloat(fondoInicial) || 0) +
         (parseFloat(ventasEfectivo) || 0) +
+        (parseFloat(propinasEfectivo) || 0) +
         (movimientos?.neto || 0)
     );
 }

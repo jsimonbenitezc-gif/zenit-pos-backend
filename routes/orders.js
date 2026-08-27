@@ -7,6 +7,7 @@ const { verifyEmployeePin } = require('../utils/verifyPin');
 const { resolverBranchId, BranchError } = require('../utils/branch');
 const { resolverFechaVenta, resolverPrecioUnitario, precioDifiere } = require('../utils/ventaOffline');
 const { desglosar, baseParaRecalcular, resolverImpuestoVenta, configImpuestoNegocio } = require('../utils/impuestos');
+const { resolverPropina, configPropinasNegocio } = require('../utils/propinas');
 const { Op } = require('sequelize');
 const { notificarAudit } = require('./audit');
 const { enviarNotificacion, getPrefs } = require('../utils/push');
@@ -418,6 +419,7 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
             employee_id: disc_employee_id, pin: disc_pin,
             loyalty_points_used, loyalty_points_earned, loyalty_discount_amount,
             skip_stock_check, client_uuid, sold_at,
+            tip_amount, tip_method,
         } = req.body;
 
         // Venta DIFERIDA (BLOQUE 5): la hizo el POS sin internet y llega ahora.
@@ -639,6 +641,17 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
         });
         const finalTotal = desglose.total;
 
+        // PROPINA (BLOQUE 9). Se resuelve DESPUÉS del impuesto y por fuera de él a
+        // propósito: la propina no es venta, así que no entra en la base gravable
+        // ni en `total`. Lo que el cliente entrega es `total + tip_amount`; lo que
+        // el negocio vendió sigue siendo `total`. Ver utils/propinas.js.
+        const propina = resolverPropina({
+            config: await configPropinasNegocio(biz),
+            tipAmount: tip_amount,
+            tipMethod: tip_method,
+            paymentMethod: payment_method,
+        });
+
         const order = await Order.create({
             customer_id,
             customer_temp_info,
@@ -652,6 +665,8 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
             // Descuento total aplicado a la venta (empleado/promo + canje de puntos),
             // para que tickets y reportes muestren lo que realmente se descontó.
             discount_amount: parseFloat((discountAmt + loyaltyAmt).toFixed(2)),
+            tip_amount: propina.monto,
+            tip_method: propina.metodo,
             status: 'registrado',
             payment_method: payment_method || 'efectivo',
             order_type: order_type || 'comer',
@@ -944,7 +959,7 @@ router.put('/:id/status', authenticate, async (req, res) => {
     const t = await sequelize.transaction();
     try {
         const biz = req.user.business_id;
-        const { status, employee_id, pin, employee_name } = req.body;
+        const { status, employee_id, pin, employee_name, payment_method, tip_amount, tip_method } = req.body;
 
         if (!['registrado', 'completado', 'entregado', 'cancelado'].includes(status)) {
             await t.rollback();
@@ -988,7 +1003,37 @@ router.put('/:id/status', authenticate, async (req, res) => {
             }
         }
 
-        await order.update({ status }, { transaction: t });
+        // Esta es la ruta con la que los clientes COBRAN una mesa
+        // (`closeTableOrder` → status 'completado' + método de pago), así que es
+        // aquí donde se decide con qué se pagó y cuánta propina se dejó.
+        const camposCobro = {};
+
+        // ⚠️ BUG PREEXISTENTE (corregido en el BLOQUE 9): el desktop mandaba
+        // `payment_method` en esta misma llamada desde siempre, pero la ruta lo
+        // descartaba. Toda mesa cobrada con tarjeta o transferencia quedaba
+        // guardada como 'efectivo', así que el cierre de turno le exigía al cajero
+        // un efectivo que nunca entró al cajón. Solo se acepta al cobrar (no al
+        // cancelar), y solo un método válido.
+        if (status !== 'cancelado' && ['efectivo', 'tarjeta', 'transferencia'].includes(payment_method)) {
+            camposCobro.payment_method = payment_method;
+        }
+
+        // PROPINA (BLOQUE 9). Se deja al cobrar, no al abrir la mesa, así que es
+        // este el momento de registrarla. No toca `total`: es dinero del cliente
+        // para el empleado. Una venta nunca falla por una propina inválida —
+        // `resolverPropina` la deja en 0 (ver utils/propinas.js).
+        if (status !== 'cancelado' && tip_amount !== undefined) {
+            const propina = resolverPropina({
+                config: await configPropinasNegocio(biz),
+                tipAmount: tip_amount,
+                tipMethod: tip_method,
+                paymentMethod: camposCobro.payment_method || order.payment_method,
+            });
+            camposCobro.tip_amount = propina.monto;
+            camposCobro.tip_method = propina.metodo;
+        }
+
+        await order.update({ status, ...camposCobro }, { transaction: t });
 
         if (authorizedEmployee && status === 'cancelado') {
             await PrivilegedActionLog.create({

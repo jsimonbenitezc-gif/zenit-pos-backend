@@ -334,6 +334,22 @@ const runMigrations = async () => {
             console.error('❌ Error asegurando columnas de impuesto:', err.message);
         }
 
+        // Propinas (BLOQUE 9). Mismas razones que arriba (§19.4). Los pedidos
+        // existentes quedan en 0, que es la verdad: hasta hoy no se registraban
+        // propinas. `tip_method` queda NULL y solo se llena cuando hay propina.
+        try {
+            await sequelize.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS tip_amount NUMERIC(10,2) DEFAULT 0');
+            await sequelize.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS tip_method VARCHAR(20)');
+            for (const col of ['total_propinas', 'total_propinas_efectivo',
+                               'total_propinas_tarjeta', 'total_propinas_transferencia']) {
+                await sequelize.query(
+                    `ALTER TABLE turnos ADD COLUMN IF NOT EXISTS ${col} NUMERIC(10,2) DEFAULT 0`
+                );
+            }
+        } catch (err) {
+            console.error('❌ Error asegurando columnas de propina:', err.message);
+        }
+
         // products.image y categories.image deben ser TEXT para guardar data URIs
         // base64 (~15-40KB). Sin esto quedan en VARCHAR(255) y el INSERT falla con
         // "value too long", perdiendo la foto. La migración CLI equivalente

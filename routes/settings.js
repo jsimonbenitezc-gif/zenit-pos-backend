@@ -9,6 +9,7 @@ const { authenticate } = require('../middleware/auth');
 const { configurarSSE } = require('../utils/sse');
 const { zonaValida, invalidarZonaNegocio } = require('../utils/tz');
 const { normalizarTasa, normalizarNombre, invalidarImpuestoNegocio, NOMBRE_MAX } = require('../utils/impuestos');
+const { normalizarSugerencias, invalidarPropinasNegocio } = require('../utils/propinas');
 
 // Protección: máximo 10 intentos de verificación de PIN por minuto por IP
 const pinLimiter = rateLimit({
@@ -68,6 +69,8 @@ router.put('/', authenticate, async (req, res) => {
             // Impuesto configurable (BLOQUE 8): interruptor, tasa en %, si el
             // precio ya lo incluye y cómo se llama en el ticket (IVA, ITBIS...).
             'tax_enabled', 'tax_rate', 'tax_included', 'tax_name',
+            // Propinas (BLOQUE 9): interruptor y porcentajes sugeridos del POS.
+            'propinas_activas', 'propina_sugerencias',
             'puntos_activos', 'puntos_por_peso', 'puntos_bono_pedido', 'puntos_valor',
             'permisos_roles',
             'sucursal_id',
@@ -133,6 +136,26 @@ router.put('/', authenticate, async (req, res) => {
             incoming.tax_name = normalizarNombre(incoming.tax_name);
         }
 
+        // Las propinas cambian lo que se le PIDE al cliente y lo que el corte le
+        // exige al cajero en el cajón, así que también son decisión del dueño.
+        // Mismo criterio (y misma razón) que el impuesto: el backend lee la config
+        // del owner, de modo que un empleado que la cambiara en sus propios
+        // settings tendría una UI que parece funcionar y no hace nada.
+        const CLAVES_PROPINA = ['propinas_activas', 'propina_sugerencias'];
+        const tocaPropina = CLAVES_PROPINA.some(k => k in incoming);
+        if (tocaPropina && req.user.id !== req.user.business_id) {
+            return res.status(403).json({ error: 'Solo el administrador puede cambiar la configuración de propinas' });
+        }
+        if ('propinas_activas' in incoming) {
+            incoming.propinas_activas = incoming.propinas_activas === true || incoming.propinas_activas === 'true';
+        }
+        // Los porcentajes solo son botones de ayuda para teclear, así que un valor
+        // basura se limpia (cae a los sugeridos) en vez de rechazar el guardado:
+        // a diferencia de la tasa de impuesto, esto no cobra de más a nadie.
+        if ('propina_sugerencias' in incoming) {
+            incoming.propina_sugerencias = normalizarSugerencias(incoming.propina_sugerencias);
+        }
+
         // La zona horaria se interpola en SQL (stats agrupa por fecha local), así que
         // se rechaza cualquier valor que no sea una zona IANA real.
         if ('tz' in incoming && !zonaValida(incoming.tz)) {
@@ -143,6 +166,7 @@ router.put('/', authenticate, async (req, res) => {
         await user.update({ settings: JSON.stringify(updated) });
         if ('tz' in incoming) invalidarZonaNegocio(req.user.business_id);
         if (tocaImpuesto) invalidarImpuestoNegocio(req.user.business_id);
+        if (tocaPropina) invalidarPropinasNegocio(req.user.business_id);
         // Notificar a todos los dispositivos conectados del mismo negocio
         _notificarSettings(req.user.business_id);
         res.json(updated);

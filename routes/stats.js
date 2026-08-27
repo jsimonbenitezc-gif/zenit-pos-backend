@@ -65,7 +65,11 @@ router.get('/dashboard', authenticate, async (req, res) => {
                 // BLOQUE 8 — Impuesto recaudado hoy. Se agrega como línea aparte:
                 // `monto_total` sigue siendo lo COBRADO (el número que el dueño ya
                 // conoce), y de ahí se deriva cuánto es suyo y cuánto del fisco.
-                [sequelize.fn('COALESCE', sequelize.fn('SUM', sequelize.col('tax_amount')), 0), 'impuesto_total']
+                [sequelize.fn('COALESCE', sequelize.fn('SUM', sequelize.col('tax_amount')), 0), 'impuesto_total'],
+                // BLOQUE 9 — Propinas de hoy. También es una línea aparte, y por
+                // una razón más fuerte: la propina NI SIQUIERA es del negocio, así
+                // que jamás debe sumarse a `monto_total`.
+                [sequelize.fn('COALESCE', sequelize.fn('SUM', sequelize.col('tip_amount')), 0), 'propinas_total']
             ],
             raw: true
         });
@@ -298,7 +302,8 @@ router.get('/dashboard', authenticate, async (req, res) => {
                 impuesto_total: parseFloat(ventasHoy[0].impuesto_total) || 0,
                 monto_neto: parseFloat(
                     ((parseFloat(ventasHoy[0].monto_total) || 0) - (parseFloat(ventasHoy[0].impuesto_total) || 0)).toFixed(2)
-                )
+                ),
+                propinas_total: parseFloat(ventasHoy[0].propinas_total) || 0
             },
             ventasAyer: {
                 monto_total: parseFloat(ventasAyer[0]?.monto_total) || 0,

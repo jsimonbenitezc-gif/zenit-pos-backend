@@ -93,6 +93,21 @@ const Order = sequelize.define('Order', {
         type: DataTypes.BOOLEAN,
         allowNull: true
     },
+    // ── Propina (BLOQUE 9) ───────────────────────────────────────────────
+    // NO entra en `total` ni paga impuesto: es dinero del cliente para el
+    // empleado que solo pasa por la caja. Lo que el cliente entrega es
+    // `total + tip_amount`, pero la venta del negocio sigue siendo `total`.
+    // `tip_method` puede diferir del pago (cuenta con tarjeta, propina en
+    // efectivo); null cuando no hubo propina. Ver utils/propinas.js.
+    tip_amount: {
+        type: DataTypes.DECIMAL(10, 2),
+        allowNull: true,
+        defaultValue: 0
+    },
+    tip_method: {
+        type: DataTypes.STRING(20),
+        allowNull: true
+    },
     created_by: {
         type: DataTypes.INTEGER,
         allowNull: true,

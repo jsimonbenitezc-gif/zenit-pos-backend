@@ -17,6 +17,7 @@ const models = require('../models');
 const { manejadorDeErrores, LIMITE_BODY } = require('../middleware/errorHandler');
 const { limpiarCacheUsuarios } = require('../middleware/auth');
 const { limpiarCacheImpuestos } = require('../utils/impuestos');
+const { limpiarCachePropinas } = require('../utils/propinas');
 
 // ── App Express ligera (sin Sentry, CORS, helmet, cron) ──
 // El límite del body y el manejador de errores son los MISMOS que en server.js,
@@ -62,9 +63,10 @@ async function initTestDb() {
 
     // `force: true` reinicia los autoincrement: sin esto, un id reutilizado podría
     // leer datos cacheados del usuario anterior (cachés de middleware/auth.js y
-    // utils/impuestos.js, ambas indexadas por id).
+    // utils/impuestos.js y utils/propinas.js, todas indexadas por id).
     limpiarCacheUsuarios();
     limpiarCacheImpuestos();
+    limpiarCachePropinas();
 }
 
 // ── Helper: crear usuario owner con JWT ──────────────────
