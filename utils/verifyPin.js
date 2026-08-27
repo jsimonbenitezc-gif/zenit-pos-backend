@@ -62,7 +62,9 @@ async function verifyEmployeePin(employee_id, pin, business_id) {
  */
 async function verificarPinDePerfil({ businessId, role, pin, branchId = null }) {
     const vacio = { valid: false, settingsMigrados: null, ownerId: null };
-    if (!role || !pin) return vacio;
+    // Sin PIN NO se sale de inmediato: hay que llegar hasta `rolData` para poder
+    // distinguir 'este puesto no tiene PIN configurado' de 'faltó teclearlo'.
+    if (!role) return vacio;
 
     const owner = await User.findByPk(businessId, { attributes: ['id', 'settings'] });
     if (!owner) return vacio;
@@ -91,7 +93,14 @@ async function verificarPinDePerfil({ businessId, role, pin, branchId = null }) 
     }
 
     const rolData = permisos[role];
-    if (!rolData || !rolData.pin_set) return { ...vacio, ownerId: owner.id };
+    // `sinPin` distingue "este puesto NO tiene PIN configurado" de "el PIN está
+    // mal". No es lo mismo y quien llama necesita poder decidir: ver
+    // `autorizarAccionPrivilegiada`.
+    if (!rolData) return { ...vacio, ownerId: owner.id };
+    if (!rolData.pin_set) return { ...vacio, sinPin: true, ownerId: owner.id };
+
+    // El puesto SÍ tiene PIN configurado pero no llegó ninguno: inválido.
+    if (!pin) return { ...vacio, ownerId: owner.id };
 
     if (rolData.pin_bcrypt) {
         const valid = await bcrypt.compare(pin, rolData.pin_bcrypt);
@@ -109,4 +118,75 @@ async function verificarPinDePerfil({ businessId, role, pin, branchId = null }) 
     return { ...vacio, ownerId: owner.id };
 }
 
-module.exports = { verifyEmployeePin, verificarPinDePerfil };
+/**
+ * Autoriza una acción privilegiada aceptando CUALQUIERA de las dos credenciales
+ * que existen en Zenit. Es el único lugar donde se decide quién puede cancelar,
+ * devolver, editar un cliente o mover la caja.
+ *
+ * ⚠️ LA TRAMPA QUE ESTO RESUELVE (CLAUDE.md §19.19). Zenit tiene DOS claves:
+ *
+ *   • **PIN de PUESTO** — vive en `settings.permisos_roles` del dueño y es lo
+ *     ÚNICO que el cajero teclea en el POS, porque los puestos (cajero,
+ *     encargado…) son roles compartidos SIN cuenta de usuario.
+ *   • **Contraseña de CUENTA** — la de un `User` real con email. Solo la tienen
+ *     el dueño y el staff dado de alta por `/api/staff`.
+ *
+ * Aceptar solo la segunda deja la función MUERTA en el POS: es exactamente lo
+ * que pasaba con cancelar un pedido y editar un cliente, que respondían 400/403
+ * a cualquier cajero. Si escribes una ruta nueva que exija PIN, úsala desde aquí.
+ *
+ * Como no hay un `User` por puesto, la auditoría se atribuye a la cuenta con la
+ * que está firmado el equipo (`actorId`) y el puesto queda en el nombre.
+ *
+ * @returns {Promise<{ok:boolean, status?:number, error?:string, empleadoId:number|null, nombre:string|null}>}
+ */
+async function autorizarAccionPrivilegiada({
+    businessId, actorId, employee_id, employee_name, role, pin, branchId = null,
+}) {
+    if (!employee_id && !role) {
+        return { ok: false, status: 400, error: 'Se requiere PIN para esta acción', empleadoId: null, nombre: null };
+    }
+
+    // 1) PIN de puesto — el caso normal en desktop y mobile.
+    if (role) {
+        const r = await verificarPinDePerfil({ businessId, role, pin, branchId });
+
+        // ⚠️ PUESTO SIN PIN CONFIGURADO = solo confirmar, no bloquear.
+        // Si el dueño no le puso PIN a ese puesto, no hay nada contra qué
+        // validar: exigir uno dejaría al negocio SIN PODER CANCELAR un pedido,
+        // que es justo el problema que este arreglo viene a resolver. Es la
+        // misma decisión que ya tomaron el §28.4 (el dueño puede apagar el PIN
+        // de los movimientos de caja) y el §24 (el desktop cae a una simple
+        // confirmación cuando el equipo no tiene contraseña de app).
+        // La acción se sigue AUDITANDO: lo que se pierde es la barrera, no el rastro.
+        if (r.sinPin) {
+            return { ok: true, empleadoId: actorId, nombre: employee_name || role };
+        }
+
+        if (!pin) {
+            return { ok: false, status: 400, error: 'Se requiere PIN para esta acción', empleadoId: null, nombre: null };
+        }
+        if (!r.valid) {
+            return { ok: false, status: 403, error: 'PIN incorrecto', empleadoId: null, nombre: null };
+        }
+        if (r.settingsMigrados && r.ownerId) {
+            // Se validó por SHA256 legacy: se persiste el bcrypt recién generado.
+            await User.update({ settings: JSON.stringify(r.settingsMigrados) }, { where: { id: r.ownerId } });
+        }
+        return { ok: true, empleadoId: actorId, nombre: employee_name || role };
+    }
+
+    // 2) Contraseña de cuenta (staff con email). Aquí el PIN nunca es opcional:
+    // una cuenta SIEMPRE tiene contraseña, así que su ausencia es un error.
+    if (!pin) {
+        return { ok: false, status: 400, error: 'Se requiere PIN para esta acción', empleadoId: null, nombre: null };
+    }
+    try {
+        const empleado = await verifyEmployeePin(employee_id, pin, businessId);
+        return { ok: true, empleadoId: empleado.id, nombre: employee_name || empleado.name };
+    } catch (pinErr) {
+        return { ok: false, status: 403, error: pinErr.message, empleadoId: null, nombre: null };
+    }
+}
+
+module.exports = { verifyEmployeePin, verificarPinDePerfil, autorizarAccionPrivilegiada };

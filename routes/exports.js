@@ -1,7 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const logger = require('../utils/logger');
-const { Order, OrderItem, Product, Category, Customer, User, sequelize } = require('../models');
+const { Order, OrderItem, OrderPayment, Product, Category, Customer, User, sequelize } = require('../models');
+const { metodoDePago } = require('../utils/pagos');
 const { authenticate } = require('../middleware/auth');
 const { Op } = require('sequelize');
 
@@ -37,6 +38,9 @@ router.get('/sales', authenticate, async (req, res) => {
                 as: 'items',
                 include: [{ model: Product, as: 'product', attributes: ['name'] }],
             },
+            // Desglose por método (BLOQUE 10): sin esto, una venta dividida saldría
+            // en el CSV del contador como si hubiera entrado por un solo lado.
+            { model: OrderPayment, as: 'payments', required: false },
         ];
 
         // Solo incluir creator si la asociación existe (evita error si aún no se migró)
@@ -68,13 +72,27 @@ router.get('/sales', authenticate, async (req, res) => {
         // La propina va en su propia columna (BLOQUE 9) y NO está dentro de
         // 'Total': no es ingreso del negocio. 'Cobrado al cliente' es la suma de
         // ambos, que es lo que de verdad entró por caja en ese ticket.
-        const headers = ['Fecha', 'Hora', 'Numero de Pedido', 'Productos', 'Subtotal', 'Impuesto', 'Total', 'Propina', 'Metodo de Propina', 'Cobrado al Cliente', 'Metodo de Pago', 'Empleado'];
+        // BLOQUE 10 — Con pagos divididos, 'Metodo de Pago' dice 'multiple' y el
+        // reparto real va en las tres columnas por método. Una venta de un solo
+        // método deja dos de ellas en 0, que es la verdad.
+        const headers = ['Fecha', 'Hora', 'Numero de Pedido', 'Productos', 'Subtotal', 'Impuesto', 'Total', 'Propina', 'Metodo de Propina', 'Cobrado al Cliente', 'Metodo de Pago', 'Efectivo', 'Tarjeta', 'Transferencia', 'Empleado'];
         const rows = orders.map(o => {
             const fecha = new Date(o.createdAt);
             const productos = (o.items || []).map(i => {
                 const name = i.product ? i.product.name : 'Producto';
                 return `${i.quantity}x ${name}`;
             }).join(', ');
+
+            // Reparto de ESTE ticket. Sin pagos, el total entra entero por su
+            // método, igual que antes del BLOQUE 10.
+            const porMetodo = { efectivo: 0, tarjeta: 0, transferencia: 0 };
+            if (o.payments && o.payments.length > 0) {
+                for (const pago of o.payments) {
+                    porMetodo[metodoDePago(pago.method)] += parseFloat(pago.amount) || 0;
+                }
+            } else {
+                porMetodo[metodoDePago(o.payment_method)] += parseFloat(o.total) || 0;
+            }
             return [
                 fecha.toISOString().split('T')[0],
                 fecha.toTimeString().split(' ')[0],
@@ -87,6 +105,9 @@ router.get('/sales', authenticate, async (req, res) => {
                 parseFloat(o.tip_amount || 0) > 0 ? (o.tip_method || o.payment_method || '') : '',
                 (parseFloat(o.total) + (parseFloat(o.tip_amount) || 0)).toFixed(2),
                 o.payment_method || '',
+                porMetodo.efectivo.toFixed(2),
+                porMetodo.tarjeta.toFixed(2),
+                porMetodo.transferencia.toFixed(2),
                 o.creator ? o.creator.name : '',
             ];
         });

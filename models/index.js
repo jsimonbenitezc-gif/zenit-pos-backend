@@ -7,6 +7,8 @@ const Category = require('./Category');
 const Customer = require('./Customer');
 const Order = require('./Order');
 const OrderItem = require('./OrderItem');
+// Pagos de una venta (efectivo + tarjeta en la misma cuenta). BLOQUE 10.
+const OrderPayment = require('./OrderPayment');
 
 // Inventario
 const Ingredient = require('./Ingredient');
@@ -56,6 +58,7 @@ const models = {
     Customer,
     Order,
     OrderItem,
+    OrderPayment,
     Ingredient,
     Preparation,
     PreparationItem,
@@ -89,6 +92,10 @@ const setupRelations = () => {
     // Order <-> OrderItem
     models.Order.hasMany(models.OrderItem, { foreignKey: 'order_id', as: 'items' });
     models.OrderItem.belongsTo(models.Order, { foreignKey: 'order_id', as: 'order' });
+
+    // Order <-> OrderPayment (BLOQUE 10 — desglose de `total` por método de pago)
+    models.Order.hasMany(models.OrderPayment, { foreignKey: 'order_id', as: 'payments' });
+    models.OrderPayment.belongsTo(models.Order, { foreignKey: 'order_id', as: 'order' });
 
     // Product <-> OrderItem
     models.Product.hasMany(models.OrderItem, { foreignKey: 'product_id', as: 'order_items' });
@@ -348,6 +355,74 @@ const runMigrations = async () => {
             }
         } catch (err) {
             console.error('❌ Error asegurando columnas de propina:', err.message);
+        }
+
+        // Pagos divididos (BLOQUE 10). `sequelize.sync()` crea `order_payments` si no
+        // existe, pero no toca tablas existentes: los índices se aseguran aquí (§19.4).
+        //
+        // ⚠️ `orders.payment_method` es un ENUM en Postgres y necesita el valor
+        // 'multiple' para las ventas repartidas entre varios métodos. `ADD VALUE IF
+        // NOT EXISTS` es idempotente y no reescribe la tabla. Un pedido de un solo
+        // método sigue guardando su método de siempre, así que nada existente cambia.
+        try {
+            await sequelize.query(
+                `ALTER TYPE "enum_orders_payment_method" ADD VALUE IF NOT EXISTS 'multiple'`
+            );
+        } catch (err) {
+            // Si la columna no es ENUM (instalaciones que la crearon como VARCHAR)
+            // no hay nada que hacer y tampoco es un problema: el valor entra igual.
+            console.error('ℹ️  payment_method ENUM:', err.message);
+        }
+        try {
+            await sequelize.query(
+                'CREATE INDEX IF NOT EXISTS order_payments_order_idx ON order_payments (order_id)'
+            );
+            await sequelize.query(
+                'CREATE INDEX IF NOT EXISTS order_payments_biz_idx ON order_payments (business_id)'
+            );
+        } catch (err) {
+            console.error('❌ Error asegurando índices de order_payments:', err.message);
+        }
+
+        // ── CERRAR LA BASE A LOS ROLES PÚBLICOS (auditoría 2026-07-27) ──────
+        // Zenit NO usa PostgREST: se conecta con Sequelize por el pooler como
+        // `postgres`, que es DUEÑO de las tablas y tiene `rolbypassrls = true`.
+        // Por eso ni el REVOKE ni el RLS pueden afectarlo — verificado en vivo.
+        //
+        // `anon` y `authenticated` son los roles que expone la Data API de
+        // Supabase. Esa API ya está apagada, pero si alguien la vuelve a encender
+        // desde el panel (por error o por probar algo), sin esto la puerta se
+        // reabriría entera: lectura Y escritura anónimas sobre producción,
+        // incluida `users.password`. Esto es lo que hace que ese error deje de
+        // ser catastrófico.
+        //
+        // Va aquí y no en un SQL suelto a propósito: `sequelize.sync()` crea las
+        // tablas nuevas y Supabase les concede permisos por defecto, así que un
+        // REVOKE de una sola vez se filtraría en la siguiente tabla. Aquí se
+        // re-aplica en cada arranque (§19.4) y además cubre lo que venga.
+        // Es idempotente: revocar lo ya revocado y encender RLS ya encendido no
+        // hace nada.
+        try {
+            await sequelize.query(`
+                DO $$
+                DECLARE t record;
+                BEGIN
+                  FOR t IN SELECT tablename FROM pg_tables WHERE schemaname = 'public' LOOP
+                    EXECUTE format('REVOKE ALL ON public.%I FROM anon, authenticated', t.tablename);
+                    EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', t.tablename);
+                  END LOOP;
+                END $$;
+            `);
+            await sequelize.query('REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM anon, authenticated');
+            await sequelize.query('REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM anon, authenticated');
+            // Y que lo que se cree a futuro nazca igual de cerrado.
+            await sequelize.query('ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM anon, authenticated');
+            await sequelize.query('ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON SEQUENCES FROM anon, authenticated');
+            await sequelize.query('ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON FUNCTIONS FROM anon, authenticated');
+        } catch (err) {
+            // Nunca tumbar el arranque por esto: si falla, el backend sigue
+            // funcionando y queda el rastro para revisarlo.
+            console.error('❌ Error cerrando permisos públicos de la base:', err.message);
         }
 
         // products.image y categories.image deben ser TEXT para guardar data URIs

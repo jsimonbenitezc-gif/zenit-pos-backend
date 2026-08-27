@@ -1,13 +1,14 @@
 const express = require('express');
 const router = express.Router();
 const logger = require('../utils/logger');
-const { Order, OrderItem, Product, Customer, Table, ProductRecipe, Ingredient, PreparationItem, PrivilegedActionLog, BranchStock, User, Discount, sequelize } = require('../models');
+const { Order, OrderItem, OrderPayment, Product, Customer, Table, ProductRecipe, Ingredient, PreparationItem, PrivilegedActionLog, BranchStock, User, Discount, sequelize } = require('../models');
 const { authenticate } = require('../middleware/auth');
-const { verifyEmployeePin } = require('../utils/verifyPin');
+const { autorizarAccionPrivilegiada } = require('../utils/verifyPin');
 const { resolverBranchId, BranchError } = require('../utils/branch');
 const { resolverFechaVenta, resolverPrecioUnitario, precioDifiere } = require('../utils/ventaOffline');
 const { desglosar, baseParaRecalcular, resolverImpuestoVenta, configImpuestoNegocio } = require('../utils/impuestos');
 const { resolverPropina, configPropinasNegocio } = require('../utils/propinas');
+const { resolverPagos } = require('../utils/pagos');
 const { Op } = require('sequelize');
 const { notificarAudit } = require('./audit');
 const { enviarNotificacion, getPrefs } = require('../utils/push');
@@ -271,7 +272,10 @@ function cargarPedidoCompleto(orderId) {
                 as: 'items',
                 include: [{ model: Product, as: 'product', attributes: ['id', 'name', 'emoji'] }]
             },
-            { model: User, as: 'creator', attributes: ['id', 'name'], required: false }
+            { model: User, as: 'creator', attributes: ['id', 'name'], required: false },
+            // Desglose por método de pago (BLOQUE 10): el POS lo necesita en la
+            // respuesta post-venta para imprimir el ticket con la división.
+            { model: OrderPayment, as: 'payments', required: false }
         ]
     });
 }
@@ -280,10 +284,16 @@ function cargarPedidoCompleto(orderId) {
 // productos (incluye `price` porque ahí sí se re-dibuja el precio del catálogo).
 function cargarPedidoConItems(orderId) {
     return Order.findByPk(orderId, {
-        include: [{
-            model: OrderItem, as: 'items',
-            include: [{ model: Product, as: 'product', attributes: ['id', 'name', 'emoji', 'price'] }],
-        }],
+        include: [
+            {
+                model: OrderItem, as: 'items',
+                include: [{ model: Product, as: 'product', attributes: ['id', 'name', 'emoji', 'price'] }],
+            },
+            // Desglose por método de pago (BLOQUE 10). Va en toda respuesta de
+            // pedido para que el ticket y la reimpresión puedan mostrar cómo se
+            // repartió la cuenta. Son pocas filas y sin imágenes: no pesa (§23).
+            { model: OrderPayment, as: 'payments', required: false },
+        ],
     });
 }
 
@@ -325,6 +335,11 @@ router.get('/', authenticate, async (req, res) => {
                     model: Table,
                     as: 'table',
                     attributes: ['id', 'name', 'zone'],
+                    required: false
+                },
+                {
+                    model: OrderPayment,
+                    as: 'payments',
                     required: false
                 },
                 {
@@ -416,10 +431,11 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
             payment_method, order_type, reference,
             delivery_address, maps_link, notes, branch_id,
             table_id, guests, discount_amount, discount_id,
-            employee_id: disc_employee_id, pin: disc_pin,
+            employee_id: disc_employee_id, pin: disc_pin, role: disc_role,
             loyalty_points_used, loyalty_points_earned, loyalty_discount_amount,
             skip_stock_check, client_uuid, sold_at,
             tip_amount, tip_method,
+            payments,
         } = req.body;
 
         // Venta DIFERIDA (BLOQUE 5): la hizo el POS sin internet y llega ahora.
@@ -513,16 +529,22 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
             }
             descuentoAutorizadoPorId = true;
             if (discount.requires_pin) {
-                if (!disc_employee_id || !disc_pin) {
+                // Mismo criterio que cancelar (§19.19): vale el PIN de PUESTO o la
+                // contraseña de CUENTA. Solo con la segunda, un descuento marcado
+                // "requiere PIN" era inaplicable desde el POS.
+                const authDesc = await autorizarAccionPrivilegiada({
+                    businessId: biz,
+                    actorId: req.user.id,
+                    employee_id: disc_employee_id,
+                    role: disc_role,
+                    pin: disc_pin,
+                    branchId: branchIdFinal,
+                });
+                if (!authDesc.ok) {
                     await t.rollback();
-                    return res.status(403).json({ error: 'Este descuento requiere autorización con PIN' });
+                    return res.status(403).json({ error: authDesc.error });
                 }
-                try {
-                    descuentoEmpleado = await verifyEmployeePin(disc_employee_id, disc_pin, biz);
-                } catch (pinErr) {
-                    await t.rollback();
-                    return res.status(403).json({ error: pinErr.message });
-                }
+                descuentoEmpleado = { id: authDesc.empleadoId, name: authDesc.nombre };
             }
         }
 
@@ -593,12 +615,19 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
                 await t.rollback();
                 return res.status(403).json({ error: 'Aplicar un descuento requiere autorización con PIN' });
             }
-            try {
-                descuentoEmpleado = await verifyEmployeePin(disc_employee_id, disc_pin, biz);
-            } catch (pinErr) {
+            const authDesc = await autorizarAccionPrivilegiada({
+                businessId: biz,
+                actorId: req.user.id,
+                employee_id: disc_employee_id,
+                role: disc_role,
+                pin: disc_pin,
+                branchId: branchIdFinal,
+            });
+            if (!authDesc.ok) {
                 await t.rollback();
-                return res.status(403).json({ error: pinErr.message });
+                return res.status(403).json({ error: authDesc.error });
             }
+            descuentoEmpleado = { id: authDesc.empleadoId, name: authDesc.nombre };
         }
 
         // Canje de puntos de fidelidad: NO es un descuento del empleado (el cliente
@@ -645,12 +674,47 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
         // propósito: la propina no es venta, así que no entra en la base gravable
         // ni en `total`. Lo que el cliente entrega es `total + tip_amount`; lo que
         // el negocio vendió sigue siendo `total`. Ver utils/propinas.js.
+        const configPropinas = await configPropinasNegocio(biz);
         const propina = resolverPropina({
-            config: await configPropinasNegocio(biz),
+            config: configPropinas,
             tipAmount: tip_amount,
             tipMethod: tip_method,
             paymentMethod: payment_method,
         });
+
+        // PAGOS DIVIDIDOS (BLOQUE 10). Los pagos REPARTEN `finalTotal`, no lo
+        // aumentan: se resuelven después de conocerlo. Sin `payments` en el body
+        // la venta es de un solo método y todo queda exactamente como antes.
+        // Ver la regla completa en utils/pagos.js.
+        const reparto = resolverPagos({
+            payments,
+            total: finalTotal,
+            esVentaDiferida,
+            propinasActivas: configPropinas.activo,
+            metodoPorDefecto: payment_method,
+        });
+        if (reparto.error) {
+            await t.rollback();
+            return res.status(400).json({ error: reparto.error });
+        }
+        if (reparto.descartado) {
+            // Venta offline con un desglose que no cuadra: se registra igual con su
+            // método único (el total es correcto; solo se pierde el detalle). Queda
+            // el rastro para poder investigarlo — §26: una venta atascada es peor.
+            logger.warn(`Pagos descartados en venta diferida (negocio ${biz}): ${reparto.descartado}`);
+        }
+
+        // Con varios métodos, `payment_method` pasa a 'multiple' y el desglose real
+        // vive en `order_payments`. Con uno solo, es ese método de siempre.
+        const metodoFinal = reparto.aplicar
+            ? reparto.metodoResumen
+            : (payment_method || 'efectivo');
+
+        // Con pagos, la propina de la venta es la SUMA de las de cada pago (cada
+        // comensal deja la suya). Sin pagos, la del BLOQUE 9 tal cual.
+        const propinaFinal = reparto.aplicar && reparto.propina.monto > 0
+            ? reparto.propina
+            : propina;
 
         const order = await Order.create({
             customer_id,
@@ -665,10 +729,10 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
             // Descuento total aplicado a la venta (empleado/promo + canje de puntos),
             // para que tickets y reportes muestren lo que realmente se descontó.
             discount_amount: parseFloat((discountAmt + loyaltyAmt).toFixed(2)),
-            tip_amount: propina.monto,
-            tip_method: propina.metodo,
+            tip_amount: propinaFinal.monto,
+            tip_method: propinaFinal.metodo,
             status: 'registrado',
-            payment_method: payment_method || 'efectivo',
+            payment_method: metodoFinal,
             order_type: order_type || 'comer',
             reference,
             delivery_address,
@@ -689,8 +753,11 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
             ...(esVentaDiferida ? { createdAt: fechaVenta } : {}),
         }, { transaction: t });
 
+        // Se guardan los items creados en orden para poder traducir los
+        // `item_indexes` de una división POR ITEMS a ids reales (ver utils/pagos.js).
+        const itemsCreados = [];
         for (const { product, qty, unitPrice, subtotal, notes: itemNotes } of resolvedItems) {
-            await OrderItem.create({
+            const itemCreado = await OrderItem.create({
                 order_id: order.id,
                 product_id: product.id,
                 quantity: qty,
@@ -698,9 +765,33 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
                 subtotal,
                 notes: itemNotes
             }, { transaction: t });
+            itemsCreados.push(itemCreado);
 
             // Descontar insumos según la receta del producto (si tiene receta)
             await descontarIngredientesDeReceta(product.id, qty, t, branchIdFinal);
+        }
+
+        // PAGOS DIVIDIDOS (BLOQUE 10). Van en la MISMA transacción que la venta:
+        // un pedido cuyo desglose de pagos se perdiera a medias descuadraría el
+        // corte de caja sin que nadie pudiera notarlo.
+        if (reparto.aplicar) {
+            for (const pago of reparto.pagos) {
+                // `item_indexes` son posiciones del array `items` de esta misma
+                // petición; se traducen ahora que los items ya tienen id.
+                const idsPorIndice = pago.item_indexes
+                    .map(i => itemsCreados[i])
+                    .filter(Boolean)
+                    .map(it => it.id);
+
+                await OrderPayment.create({
+                    order_id: order.id,
+                    business_id: biz,
+                    method: pago.method,
+                    amount: pago.amount,
+                    tip_amount: pago.tip_amount,
+                    item_ids: idsPorIndice.length ? idsPorIndice : pago.item_ids,
+                }, { transaction: t });
+            }
         }
 
         // Actualizar puntos de fidelidad dentro de la misma transacción
@@ -959,16 +1050,24 @@ router.put('/:id/status', authenticate, async (req, res) => {
     const t = await sequelize.transaction();
     try {
         const biz = req.user.business_id;
-        const { status, employee_id, pin, employee_name, payment_method, tip_amount, tip_method } = req.body;
+        const { status, employee_id, pin, employee_name, role, payment_method, tip_amount, tip_method, payments } = req.body;
 
         if (!['registrado', 'completado', 'entregado', 'cancelado'].includes(status)) {
             await t.rollback();
             return res.status(400).json({ error: 'Estado inválido. Use: registrado, completado, entregado o cancelado' });
         }
 
+        // ⚠️ EL LOCK Y EL INCLUDE VAN POR SEPARADO, A PROPÓSITO.
+        // Postgres rechaza `FOR UPDATE` sobre el lado nullable de un OUTER JOIN
+        // ("FOR UPDATE cannot be applied to the nullable side of an outer join"),
+        // y Sequelize genera exactamente eso al combinar `include` con `lock`.
+        // Esta ruta las tenía juntas, así que respondía **500 siempre** en
+        // producción: cobrar una mesa y cancelar un pedido estuvieron rotos desde
+        // el 2026-07-27. No se detectó porque los tests corren sobre **SQLite**,
+        // que ignora `FOR UPDATE` — la suite pasaba en verde con la ruta muerta.
+        // Ver `tests/lock-sin-include.test.js`.
         const order = await Order.findOne({
             where: { id: req.params.id, business_id: biz },
-            include: [{ model: OrderItem, as: 'items' }],
             transaction: t,
             lock: t.LOCK.UPDATE
         });
@@ -976,6 +1075,12 @@ router.put('/:id/status', authenticate, async (req, res) => {
             await t.rollback();
             return res.status(404).json({ error: 'Pedido no encontrado' });
         }
+
+        // Los items se leen en una consulta aparte, ya con el pedido bloqueado.
+        const itemsPedido = await OrderItem.findAll({
+            where: { order_id: order.id },
+            transaction: t
+        });
 
         // Si se está cancelando: requiere PIN obligatorio y solo desde 'registrado'
         let authorizedEmployee = null;
@@ -985,19 +1090,23 @@ router.put('/:id/status', authenticate, async (req, res) => {
                 await t.rollback();
                 return res.status(400).json({ error: 'Este pedido ya fue procesado. Usa "devolución" en lugar de cancelar.' });
             }
-            if (!employee_id || !pin) {
+            // Acepta el PIN de PUESTO (`role`, lo que teclea el cajero) o la
+            // contraseña de CUENTA (`employee_id`). Antes solo aceptaba la segunda,
+            // que el POS no tiene, así que ningún cajero podía cancelar. Ver §19.19.
+            const auth = await autorizarAccionPrivilegiada({
+                businessId: biz,
+                actorId: req.user.id,
+                employee_id, employee_name, role, pin,
+                branchId: order.branch_id || null,
+            });
+            if (!auth.ok) {
                 await t.rollback();
-                return res.status(400).json({ error: 'Se requiere PIN para esta acción' });
+                return res.status(auth.status).json({ error: auth.error });
             }
-            try {
-                authorizedEmployee = await verifyEmployeePin(employee_id, pin, biz);
-            } catch (pinErr) {
-                await t.rollback();
-                return res.status(403).json({ error: pinErr.message });
-            }
+            authorizedEmployee = { id: auth.empleadoId, name: auth.nombre };
 
             // Restaurar insumos: el pedido estaba en 'registrado' (no elaborado).
-            for (const item of order.items) {
+            for (const item of itemsPedido) {
                 const qty = Math.max(1, parseInt(item.quantity) || 1);
                 await restaurarIngredientesDeReceta(item.product_id, qty, t, order.branch_id || null);
             }
@@ -1022,15 +1131,62 @@ router.put('/:id/status', authenticate, async (req, res) => {
         // este el momento de registrarla. No toca `total`: es dinero del cliente
         // para el empleado. Una venta nunca falla por una propina inválida —
         // `resolverPropina` la deja en 0 (ver utils/propinas.js).
+        const configPropinas = await configPropinasNegocio(biz);
         if (status !== 'cancelado' && tip_amount !== undefined) {
             const propina = resolverPropina({
-                config: await configPropinasNegocio(biz),
+                config: configPropinas,
                 tipAmount: tip_amount,
                 tipMethod: tip_method,
                 paymentMethod: camposCobro.payment_method || order.payment_method,
             });
             camposCobro.tip_amount = propina.monto;
             camposCobro.tip_method = propina.metodo;
+        }
+
+        // PAGOS DIVIDIDOS (BLOQUE 10). Éste es el momento de "dividir la cuenta":
+        // la mesa ya tiene todos sus items y el cliente dice cómo la paga. Los
+        // `item_ids` de cada pago son ids REALES de `order_items` (a diferencia
+        // de una venta de mostrador, donde los items nacen en la misma petición).
+        //
+        // Al cobrar se REEMPLAZA el desglose anterior: si el cajero se equivocó y
+        // vuelve a cobrar, no deben quedar los pagos viejos sumando de más.
+        if (status !== 'cancelado' && payments !== undefined) {
+            const reparto = resolverPagos({
+                payments,
+                total: order.total,
+                esVentaDiferida: false,
+                propinasActivas: configPropinas.activo,
+                metodoPorDefecto: camposCobro.payment_method || order.payment_method,
+            });
+            if (reparto.error) {
+                await t.rollback();
+                return res.status(400).json({ error: reparto.error });
+            }
+            if (reparto.aplicar) {
+                await OrderPayment.destroy({ where: { order_id: order.id }, transaction: t });
+
+                // Solo se aceptan ids de items que de verdad son de ESTA cuenta:
+                // un id ajeno haría que el ticket dijera que alguien pagó algo que
+                // no estaba en su mesa.
+                const idsValidos = new Set(itemsPedido.map(i => i.id));
+
+                for (const pago of reparto.pagos) {
+                    await OrderPayment.create({
+                        order_id: order.id,
+                        business_id: biz,
+                        method: pago.method,
+                        amount: pago.amount,
+                        tip_amount: pago.tip_amount,
+                        item_ids: pago.item_ids.filter(id => idsValidos.has(id)),
+                    }, { transaction: t });
+                }
+
+                camposCobro.payment_method = reparto.metodoResumen;
+                if (reparto.propina.monto > 0) {
+                    camposCobro.tip_amount = reparto.propina.monto;
+                    camposCobro.tip_method = reparto.propina.metodo;
+                }
+            }
         }
 
         await order.update({ status, ...camposCobro }, { transaction: t });
@@ -1064,7 +1220,9 @@ router.put('/:id/status', authenticate, async (req, res) => {
             );
         }
 
-        res.json(order);
+        // Se recarga para devolver el desglose de pagos (BLOQUE 10): el cliente
+        // imprime el ticket con esta respuesta y necesita saber cómo se repartió.
+        res.json(await cargarPedidoConItems(order.id));
     } catch (error) {
         await t.rollback();
         logger.error('Update order status error:', error);
@@ -1120,20 +1278,19 @@ router.delete('/:id', authenticate, async (req, res) => {
 
     try {
         const biz = req.user.business_id;
-        const { employee_id, pin } = req.body || {};
+        const { employee_id, pin, employee_name, role } = req.body || {};
 
-        // PIN obligatorio para eliminar pedidos
-        if (!employee_id || !pin) {
+        // Misma regla que PUT /:id/status: PIN de puesto o contraseña de cuenta.
+        const auth = await autorizarAccionPrivilegiada({
+            businessId: biz,
+            actorId: req.user.id,
+            employee_id, employee_name, role, pin,
+        });
+        if (!auth.ok) {
             await t.rollback();
-            return res.status(400).json({ error: 'Se requiere PIN para esta acción' });
+            return res.status(auth.status).json({ error: auth.error });
         }
-        let authorizedEmployee = null;
-        try {
-            authorizedEmployee = await verifyEmployeePin(employee_id, pin, biz);
-        } catch (pinErr) {
-            await t.rollback();
-            return res.status(403).json({ error: pinErr.message });
-        }
+        const authorizedEmployee = { id: auth.empleadoId, name: auth.nombre };
 
         const order = await Order.findOne({
             where: { id: req.params.id, business_id: biz },
@@ -1214,20 +1371,19 @@ router.post('/:id/devolucion', authenticate, async (req, res) => {
     const t = await sequelize.transaction();
     try {
         const biz = req.user.business_id;
-        const { employee_id, pin, employee_name, motivo } = req.body || {};
+        const { employee_id, pin, employee_name, role, motivo } = req.body || {};
 
-        // PIN obligatorio
-        if (!employee_id || !pin) {
+        // Misma regla que cancelar: PIN de puesto o contraseña de cuenta.
+        const auth = await autorizarAccionPrivilegiada({
+            businessId: biz,
+            actorId: req.user.id,
+            employee_id, employee_name, role, pin,
+        });
+        if (!auth.ok) {
             await t.rollback();
-            return res.status(400).json({ error: 'Se requiere PIN para esta acción' });
+            return res.status(auth.status).json({ error: auth.error });
         }
-        let authorizedEmployee;
-        try {
-            authorizedEmployee = await verifyEmployeePin(employee_id, pin, biz);
-        } catch (pinErr) {
-            await t.rollback();
-            return res.status(403).json({ error: pinErr.message });
-        }
+        const authorizedEmployee = { id: auth.empleadoId, name: auth.nombre };
 
         const order = await Order.findOne({
             where: { id: req.params.id, business_id: biz },

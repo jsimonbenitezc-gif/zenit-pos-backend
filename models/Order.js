@@ -23,8 +23,12 @@ const Order = sequelize.define('Order', {
         type: DataTypes.ENUM('registrado', 'completado', 'entregado', 'cancelado', 'devuelto'),
         defaultValue: 'registrado'
     },
+    // Método de pago de la venta. 'multiple' (BLOQUE 10) significa que se repartió
+    // entre varios métodos y que el desglose real está en `order_payments`; el
+    // campo se conserva porque lo leen el historial, los filtros, el ticket y los
+    // binarios viejos. Con un solo método el valor es ese método, como siempre.
     payment_method: {
-        type: DataTypes.ENUM('efectivo', 'tarjeta', 'transferencia'),
+        type: DataTypes.ENUM('efectivo', 'tarjeta', 'transferencia', 'multiple'),
         defaultValue: 'efectivo'
     },
     order_type: {

@@ -3,7 +3,7 @@ const router = express.Router();
 const logger = require('../utils/logger');
 const { Customer, Order, PrivilegedActionLog, User, sequelize } = require('../models');
 const { authenticate, isOwner } = require('../middleware/auth');
-const { verifyEmployeePin } = require('../utils/verifyPin');
+const { autorizarAccionPrivilegiada } = require('../utils/verifyPin');
 const { Op } = require('sequelize');
 const { notificarAudit } = require('./audit');
 const { enviarNotificacion } = require('../utils/push');
@@ -204,7 +204,7 @@ router.put('/:id', authenticate, async (req, res) => {
             return res.status(404).json({ error: 'Cliente no encontrado' });
         }
 
-        const { phone, name, address, notes, employee_id, pin, employee_name } = req.body;
+        const { phone, name, address, notes, employee_id, pin, employee_name, role } = req.body;
 
         // Validar longitudes
         if (name && name.length > 200) return res.status(400).json({ error: 'El nombre no puede tener más de 200 caracteres' });
@@ -219,17 +219,20 @@ router.put('/:id', authenticate, async (req, res) => {
             }
         }
 
-        // PIN obligatorio si se envía employee_id (acción auditada)
+        // Acción auditada: se pide autorización si el cliente la ofrece, con el
+        // PIN de PUESTO (`role`) o la contraseña de CUENTA (`employee_id`).
+        // Aceptar solo la segunda dejaba la edición con PIN muerta en el POS
+        // (el cajero no tiene cuenta propia). Ver §19.19.
         let authorizedEmployee = null;
-        if (employee_id) {
-            if (!pin) {
-                return res.status(400).json({ error: 'Se requiere PIN para esta acción' });
-            }
-            try {
-                authorizedEmployee = await verifyEmployeePin(employee_id, pin, biz);
-            } catch (pinErr) {
-                return res.status(403).json({ error: pinErr.message });
-            }
+        if (employee_id || role) {
+            const auth = await autorizarAccionPrivilegiada({
+                businessId: biz,
+                actorId: req.user.id,
+                employee_id, employee_name, role, pin,
+                branchId: req.user.branch_id || null,
+            });
+            if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+            authorizedEmployee = { id: auth.empleadoId, name: auth.nombre };
         }
 
         if (phone && phone !== customer.phone) {

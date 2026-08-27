@@ -2,16 +2,17 @@ const express = require('express');
 const router = express.Router();
 const logger = require('../utils/logger');
 const { Op } = require('sequelize');
-const { Turno, Order, CashMovement, PrivilegedActionLog, sequelize } = require('../models');
+const { Turno, Order, OrderPayment, CashMovement, PrivilegedActionLog, sequelize } = require('../models');
 const { authenticate } = require('../middleware/auth');
 const { filtroVentaContable } = require('../utils/ordersFilter');
 const { resolverBranchId, filtroSucursalTurno, BranchError } = require('../utils/branch');
 const { configurarSSE } = require('../utils/sse');
 const { enviarNotificacion, getPrefs } = require('../utils/push');
-const { verifyEmployeePin, verificarPinDePerfil } = require('../utils/verifyPin');
+const { autorizarAccionPrivilegiada } = require('../utils/verifyPin');
 const { User } = require('../models');
 const { TIPOS, totalesMovimientos, efectivoEsperado, montoValido } = require('../utils/cashMovements');
-const { totalesPropinas } = require('../utils/propinas');
+
+const { totalesPorMetodo } = require('../utils/pagos');
 
 // ── Movimientos de caja (BLOQUE 7) ──────────────────────────────────────────
 // Sacar efectivo del cajón es una acción de dinero, igual que un descuento: pide
@@ -43,32 +44,14 @@ async function _requierePin(businessId, tipo) {
  * @returns {Promise<{ok:boolean, error?:string, status?:number, empleadoId:number|null, nombre:string|null}>}
  */
 async function _autorizarCaja(req, { employee_id, employee_name, role, pin, branchId }) {
-    const biz = req.user.business_id;
-
-    if (!pin || (!employee_id && !role)) {
-        return { ok: false, status: 400, error: 'Se requiere PIN para esta acción' };
-    }
-
-    // 1) PIN de puesto (el caso normal: desktop y mobile).
-    if (role) {
-        const r = await verificarPinDePerfil({ businessId: biz, role, pin, branchId });
-        if (!r.valid) return { ok: false, status: 403, error: 'PIN incorrecto' };
-        if (r.settingsMigrados && r.ownerId) {
-            // Se validó por SHA256 legacy: se persiste el bcrypt recién generado.
-            await User.update({ settings: JSON.stringify(r.settingsMigrados) }, { where: { id: r.ownerId } });
-        }
-        // No hay un User por puesto: se atribuye a la cuenta con la que está
-        // firmado el equipo, y el puesto queda en el nombre.
-        return { ok: true, empleadoId: req.user.id, nombre: employee_name || role };
-    }
-
-    // 2) Contraseña de cuenta (staff dado de alta con email).
-    try {
-        const empleado = await verifyEmployeePin(employee_id, pin, biz);
-        return { ok: true, empleadoId: empleado.id, nombre: employee_name || empleado.name };
-    } catch (pinErr) {
-        return { ok: false, status: 403, error: pinErr.message };
-    }
+    // La lógica vive en utils/verifyPin.js, compartida con cancelar pedido,
+    // devolver y editar cliente: si cada ruta decidiera por su cuenta cuál de las
+    // dos credenciales acepta, volverían a nacer funciones muertas en el POS.
+    return autorizarAccionPrivilegiada({
+        businessId: req.user.business_id,
+        actorId: req.user.id,
+        employee_id, employee_name, role, pin, branchId,
+    });
 }
 
 /** Formato consistente para el cliente (el monto viaja como número, no como string). */
@@ -233,23 +216,16 @@ async function _ventasDelTurno(turno, hasta = null) {
                 : { [Op.gte]: turno.apertura },
             ...(await filtroSucursalTurno(turno))
         },
-        attributes: ['id', 'total', 'payment_method', 'tax_amount', 'tip_amount', 'tip_method']
+        attributes: ['id', 'total', 'payment_method', 'tax_amount', 'tip_amount', 'tip_method'],
+        // BLOQUE 10 — Sin los pagos, una venta repartida entre efectivo y tarjeta
+        // se clasificaría entera por su `payment_method` y el corte le exigiría al
+        // cajero un efectivo que nunca entró al cajón.
+        include: [{ model: OrderPayment, as: 'payments', required: false }]
     });
 
-    let totalVentas = 0, totalEfectivo = 0, totalTarjeta = 0, totalTransferencia = 0;
     let totalImpuesto = 0;
     for (const p of pedidos) {
-        const t = parseFloat(p.total) || 0;
-        totalVentas += t;
         totalImpuesto += parseFloat(p.tax_amount) || 0;
-        const metodo = (p.payment_method || '').toLowerCase();
-        if (metodo === 'tarjeta' || metodo === 'card') {
-            totalTarjeta += t;
-        } else if (metodo === 'transferencia') {
-            totalTransferencia += t;
-        } else {
-            totalEfectivo += t;
-        }
     }
 
     // BLOQUE 8 — El impuesto va DENTRO del total cobrado, así que no cambia ni el
@@ -257,22 +233,29 @@ async function _ventasDelTurno(turno, hasta = null) {
     // el único a quien le sirve saber cuánto de la caja es impuesto recaudado.
     const impuesto = parseFloat(totalImpuesto.toFixed(2));
 
-    // BLOQUE 9 — Las propinas van APARTE de las ventas: no son ingreso del
-    // negocio y no deben inflar `total_ventas` ni los totales por método de pago.
-    // Se separan por método porque solo la de efectivo está en el cajón; es la
-    // única que el efectivo esperado le exige al cajero (ver utils/propinas.js).
-    const propinas = totalesPropinas(pedidos);
+    // BLOQUE 9 + 10 — Ventas y propinas repartidas por método de pago REAL.
+    // `totalesPorMetodo` usa el desglose de `order_payments` cuando existe y cae
+    // al `payment_method` del pedido cuando no (todos los anteriores al BLOQUE 10),
+    // así que un turno viejo da exactamente el mismo resultado de siempre.
+    //
+    // Las propinas van APARTE de las ventas: no son ingreso del negocio y no
+    // inflan `total_ventas`. Se separan por método porque solo la de efectivo
+    // está en el cajón; es la única que el efectivo esperado le exige al cajero.
+    const reparto = totalesPorMetodo(pedidos);
 
     return {
         total_pedidos:       pedidos.length,
-        total_ventas:        parseFloat(totalVentas.toFixed(2)),
-        total_efectivo:      parseFloat(totalEfectivo.toFixed(2)),
-        total_tarjeta:       parseFloat(totalTarjeta.toFixed(2)),
-        total_transferencia: parseFloat(totalTransferencia.toFixed(2)),
+        total_ventas:        reparto.total_ventas,
+        total_efectivo:      reparto.total_efectivo,
+        total_tarjeta:       reparto.total_tarjeta,
+        total_transferencia: reparto.total_transferencia,
         total_impuesto:      impuesto,
         // Lo que se queda el negocio, ya sin el impuesto que le corresponde al fisco.
-        total_ventas_netas:  parseFloat((totalVentas - impuesto).toFixed(2)),
-        ...propinas
+        total_ventas_netas:  parseFloat((reparto.total_ventas - impuesto).toFixed(2)),
+        total_propinas:               reparto.total_propinas,
+        total_propinas_efectivo:      reparto.total_propinas_efectivo,
+        total_propinas_tarjeta:       reparto.total_propinas_tarjeta,
+        total_propinas_transferencia: reparto.total_propinas_transferencia,
     };
 }
 
