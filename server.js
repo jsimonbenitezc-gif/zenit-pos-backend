@@ -163,6 +163,8 @@ app.use('/api/customers', require('./routes/customers'));
 app.use('/api/stats', require('./routes/stats'));
 app.use('/api/inventory', require('./routes/inventory'));
 app.use('/api/offers', require('./routes/offers'));
+// Biblioteca de modificadores de producto (BLOQUE 11)
+app.use('/api/modifiers', require('./routes/modifiers'));
 app.use('/api/settings', require('./routes/settings'));
 app.use('/api/staff', require('./routes/staff'));
 app.use('/api/alerts', require('./routes/alerts'));

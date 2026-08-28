@@ -18,6 +18,7 @@ const { manejadorDeErrores, LIMITE_BODY } = require('../middleware/errorHandler'
 const { limpiarCacheUsuarios } = require('../middleware/auth');
 const { limpiarCacheImpuestos } = require('../utils/impuestos');
 const { limpiarCachePropinas } = require('../utils/propinas');
+const { limpiarCacheModificadores } = require('../utils/modificadores');
 
 // ── App Express ligera (sin Sentry, CORS, helmet, cron) ──
 // El límite del body y el manejador de errores son los MISMOS que en server.js,
@@ -31,6 +32,7 @@ app.use('/api/categories', require('../routes/categories'));
 app.use('/api/orders',     require('../routes/orders'));
 app.use('/api/customers',  require('../routes/customers'));
 app.use('/api/inventory',  require('../routes/inventory'));
+app.use('/api/modifiers',  require('../routes/modifiers'));
 app.use('/api/staff',      require('../routes/staff'));
 app.use('/api/stats',      require('../routes/stats'));
 app.use('/api/settings',   require('../routes/settings'));
@@ -67,6 +69,7 @@ async function initTestDb() {
     limpiarCacheUsuarios();
     limpiarCacheImpuestos();
     limpiarCachePropinas();
+    limpiarCacheModificadores();
 }
 
 // ── Helper: crear usuario owner con JWT ──────────────────

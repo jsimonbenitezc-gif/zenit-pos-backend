@@ -17,6 +17,13 @@ const PreparationItem = require('./PreparationItem');
 const ProductRecipe = require('./ProductRecipe');
 const InventoryMovement = require('./InventoryMovement');
 
+// Modificadores de producto con precio (BLOQUE 11). Biblioteca del negocio:
+// los grupos se configuran una vez y se enganchan a los productos que los usan.
+const ModifierGroup = require('./ModifierGroup');
+const ModifierOption = require('./ModifierOption');
+const ProductModifierGroup = require('./ProductModifierGroup');
+const ModifierOptionRecipe = require('./ModifierOptionRecipe');
+
 // Ofertas
 const Discount = require('./Discount');
 const Combo = require('./Combo');
@@ -64,6 +71,10 @@ const models = {
     PreparationItem,
     ProductRecipe,
     InventoryMovement,
+    ModifierGroup,
+    ModifierOption,
+    ProductModifierGroup,
+    ModifierOptionRecipe,
     Discount,
     Combo,
     ComboItem,
@@ -110,6 +121,19 @@ const setupRelations = () => {
     // Product <-> ProductRecipe
     models.Product.hasMany(models.ProductRecipe, { foreignKey: 'product_id', as: 'recipe' });
     models.ProductRecipe.belongsTo(models.Product, { foreignKey: 'product_id', as: 'product' });
+
+    // Modificadores (BLOQUE 11): grupo → opciones → ajuste de receta,
+    // y la puente que engancha un grupo de la biblioteca a un producto.
+    models.ModifierGroup.hasMany(models.ModifierOption, { foreignKey: 'group_id', as: 'options', onDelete: 'CASCADE' });
+    models.ModifierOption.belongsTo(models.ModifierGroup, { foreignKey: 'group_id', as: 'group' });
+
+    models.ModifierOption.hasMany(models.ModifierOptionRecipe, { foreignKey: 'option_id', as: 'recipe', onDelete: 'CASCADE' });
+    models.ModifierOptionRecipe.belongsTo(models.ModifierOption, { foreignKey: 'option_id', as: 'option' });
+
+    models.Product.hasMany(models.ProductModifierGroup, { foreignKey: 'product_id', as: 'modifierLinks', onDelete: 'CASCADE' });
+    models.ProductModifierGroup.belongsTo(models.Product, { foreignKey: 'product_id', as: 'product' });
+    models.ModifierGroup.hasMany(models.ProductModifierGroup, { foreignKey: 'group_id', as: 'productLinks', onDelete: 'CASCADE' });
+    models.ProductModifierGroup.belongsTo(models.ModifierGroup, { foreignKey: 'group_id', as: 'group' });
 
     // InventoryMovement <-> Ingredient
     models.Ingredient.hasMany(models.InventoryMovement, { foreignKey: 'ingredient_id', as: 'movements' });
@@ -382,6 +406,41 @@ const runMigrations = async () => {
             );
         } catch (err) {
             console.error('❌ Error asegurando índices de order_payments:', err.message);
+        }
+
+        // Modificadores de producto (BLOQUE 11). `sequelize.sync()` crea las
+        // cuatro tablas nuevas si no existen, pero NO toca `order_items`, que ya
+        // existe: sus dos columnas nuevas se aseguran aquí (§19.4).
+        //
+        // Los renglones ya existentes quedan con `modifiers` NULL y
+        // `base_unit_price` NULL a propósito: su `unit_price` ES el precio base
+        // y no hubo extras que desglosar. No hay nada que migrar.
+        try {
+            await sequelize.query('ALTER TABLE order_items ADD COLUMN IF NOT EXISTS modifiers TEXT');
+            await sequelize.query('ALTER TABLE order_items ADD COLUMN IF NOT EXISTS base_unit_price NUMERIC(10,2)');
+        } catch (err) {
+            console.error('❌ Error asegurando columnas de modificadores en order_items:', err.message);
+        }
+        try {
+            await sequelize.query(
+                'CREATE INDEX IF NOT EXISTS modifier_groups_biz_idx ON modifier_groups (business_id)'
+            );
+            await sequelize.query(
+                'CREATE INDEX IF NOT EXISTS modifier_options_group_idx ON modifier_options (group_id)'
+            );
+            await sequelize.query(
+                'CREATE INDEX IF NOT EXISTS modifier_option_recipes_option_idx ON modifier_option_recipes (option_id)'
+            );
+            // La puente se consulta por producto (armar el carrito) y se limpia
+            // por grupo (al borrar un grupo de la biblioteca).
+            await sequelize.query(
+                'CREATE INDEX IF NOT EXISTS product_modifier_groups_product_idx ON product_modifier_groups (product_id)'
+            );
+            await sequelize.query(
+                'CREATE UNIQUE INDEX IF NOT EXISTS product_modifier_groups_uq ON product_modifier_groups (product_id, group_id)'
+            );
+        } catch (err) {
+            console.error('❌ Error asegurando índices de modificadores:', err.message);
         }
 
         // ── CERRAR LA BASE A LOS ROLES PÚBLICOS (auditoría 2026-07-27) ──────

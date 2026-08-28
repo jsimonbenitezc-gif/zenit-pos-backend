@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const logger = require('../utils/logger');
-const { Order, OrderItem, OrderPayment, Product, Customer, Table, ProductRecipe, Ingredient, PreparationItem, PrivilegedActionLog, BranchStock, User, Discount, sequelize } = require('../models');
+const { Order, OrderItem, OrderPayment, Product, Customer, Table, ProductRecipe, Ingredient, PreparationItem, PrivilegedActionLog, BranchStock, User, Discount, ModifierOptionRecipe, sequelize } = require('../models');
 const { authenticate } = require('../middleware/auth');
 const { autorizarAccionPrivilegiada } = require('../utils/verifyPin');
 const { resolverBranchId, BranchError } = require('../utils/branch');
@@ -9,6 +9,9 @@ const { resolverFechaVenta, resolverPrecioUnitario, precioDifiere } = require('.
 const { desglosar, baseParaRecalcular, resolverImpuestoVenta, configImpuestoNegocio } = require('../utils/impuestos');
 const { resolverPropina, configPropinasNegocio } = require('../utils/propinas');
 const { resolverPagos } = require('../utils/pagos');
+const {
+    resolverModificadores, catalogoModificadores, precioConModificadores, leerModificadores,
+} = require('../utils/modificadores');
 const { Op } = require('sequelize');
 const { notificarAudit } = require('./audit');
 const { enviarNotificacion, getPrefs } = require('../utils/push');
@@ -126,6 +129,106 @@ async function descontarIngredientesDeReceta(productId, qty, t, branchId = null)
     }
 }
 
+// ── MODIFICADORES E INVENTARIO (BLOQUE 11) ───────────────────────────────────
+// Un modificador puede AGREGAR insumos ("extra queso": +30 g) o QUITARLOS
+// ("sin cebolla": −20 g, que devuelve lo que la receta base ya descontó).
+//
+// Por eso todo se expresa como un DELTA con signo y una sola fórmula sirve para
+// los dos casos y para los dos sentidos:
+//     vender    → stock − delta
+//     cancelar  → stock + delta
+// Con `quantity` negativa, "vender" suma y "cancelar" resta, que es exactamente
+// lo que debe pasar. Sin la parte negativa, el inventario seguiría descontando
+// la cebolla que nunca salió de la cocina.
+//
+// `signo`: -1 al vender, +1 al cancelar.
+async function aplicarRecetaDeModificadores(modificadores, qty, t, branchId, signo) {
+    if (!Array.isArray(modificadores) || modificadores.length === 0) return;
+
+    const optionIds = modificadores
+        .map(m => parseInt(m && m.option_id))
+        .filter(id => Number.isInteger(id) && id > 0);
+    if (optionIds.length === 0) return;
+
+    const ajustes = await ModifierOptionRecipe.findAll({
+        where: { option_id: optionIds },
+        transaction: t,
+    });
+    if (!ajustes.length) return;
+
+    for (const ajuste of ajustes) {
+        // Una opción elegida DOS veces en el mismo renglón ajusta dos veces.
+        const veces = optionIds.filter(id => id === ajuste.option_id).length;
+
+        if (ajuste.item_type === 'ingredient') {
+            const ingrediente = await Ingredient.findByPk(ajuste.item_id, { transaction: t, lock: t.LOCK.UPDATE });
+            if (!ingrediente) continue;
+            const delta = convertirUnidad(parseFloat(ajuste.quantity), ajuste.unit_recipe, ingrediente) * qty * veces;
+            const stockActual = await getBranchStock(ingrediente, branchId, t);
+            await setBranchStock(ingrediente, branchId, Math.max(0, stockActual + signo * delta), t);
+
+        } else if (ajuste.item_type === 'preparation') {
+            const prepItems = await PreparationItem.findAll({
+                where: { preparation_id: ajuste.item_id },
+                include: [{ model: Ingredient, as: 'ingredient' }],
+                transaction: t,
+                // Postgres no permite FOR UPDATE sobre el lado nullable de un
+                // OUTER JOIN: se bloquea solo preparation_items (§19.25).
+                lock: { level: t.LOCK.UPDATE, of: PreparationItem },
+            });
+            const cantPrep = parseFloat(ajuste.quantity) * qty * veces;
+            for (const pi of prepItems) {
+                if (!pi.ingredient) continue;
+                const delta = convertirUnidad(parseFloat(pi.quantity), pi.unit_recipe, pi.ingredient) * cantPrep;
+                const stockActual = await getBranchStock(pi.ingredient, branchId, t);
+                await setBranchStock(pi.ingredient, branchId, Math.max(0, stockActual + signo * delta), t);
+            }
+        }
+    }
+}
+
+// Suma al mapa de requerimientos lo que los modificadores agregan o quitan.
+// Un delta NEGATIVO baja el requerimiento, así que "sin cebolla" no dispara una
+// alerta de cebolla que el plato ya no lleva.
+async function acumularRequerimientosDeModificadores(modificadores, qty, requerimientos, t) {
+    if (!Array.isArray(modificadores) || modificadores.length === 0) return;
+
+    const optionIds = modificadores
+        .map(m => parseInt(m && m.option_id))
+        .filter(id => Number.isInteger(id) && id > 0);
+    if (optionIds.length === 0) return;
+
+    const ajustes = await ModifierOptionRecipe.findAll({ where: { option_id: optionIds }, transaction: t });
+
+    for (const ajuste of ajustes) {
+        const veces = optionIds.filter(id => id === ajuste.option_id).length;
+
+        if (ajuste.item_type === 'ingredient') {
+            const ingrediente = await Ingredient.findByPk(ajuste.item_id, { transaction: t });
+            if (!ingrediente) continue;
+            const cantReq = convertirUnidad(parseFloat(ajuste.quantity), ajuste.unit_recipe, ingrediente) * qty * veces;
+            const existente = requerimientos.get(ingrediente.id);
+            if (existente) existente.required += cantReq;
+            else requerimientos.set(ingrediente.id, { ingredient: ingrediente, required: cantReq });
+
+        } else if (ajuste.item_type === 'preparation') {
+            const prepItems = await PreparationItem.findAll({
+                where: { preparation_id: ajuste.item_id },
+                include: [{ model: Ingredient, as: 'ingredient' }],
+                transaction: t,
+            });
+            const cantPrep = parseFloat(ajuste.quantity) * qty * veces;
+            for (const pi of prepItems) {
+                if (!pi.ingredient) continue;
+                const cantReq = convertirUnidad(parseFloat(pi.quantity), pi.unit_recipe, pi.ingredient) * cantPrep;
+                const existente = requerimientos.get(pi.ingredient.id);
+                if (existente) existente.required += cantReq;
+                else requerimientos.set(pi.ingredient.id, { ingredient: pi.ingredient, required: cantReq });
+            }
+        }
+    }
+}
+
 // Agrega recursivamente los requerimientos de ingredientes de un producto al mapa acumulador
 async function acumularRequerimientosDeProducto(productId, qty, requerimientos, t) {
     const recetaItems = await ProductRecipe.findAll({ where: { product_id: productId }, transaction: t });
@@ -167,8 +270,11 @@ async function acumularRequerimientosDeProducto(productId, qty, requerimientos, 
 // Retorna un array de warnings con los ingredientes insuficientes. Vacío = stock OK.
 async function validarStockIngredientes(resolvedItems, branchId, t) {
     const requerimientos = new Map();
-    for (const { product, qty } of resolvedItems) {
+    for (const { product, qty, modificadores } of resolvedItems) {
         await acumularRequerimientosDeProducto(product.id, qty, requerimientos, t);
+        // Los extras cuentan para el aviso de stock: pedir 20 hamburguesas con
+        // doble queso necesita el doble de queso que la receta base.
+        await acumularRequerimientosDeModificadores(modificadores, qty, requerimientos, t);
     }
 
     const warnings = [];
@@ -557,6 +663,11 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
         // salió a un precio que hoy no existe, y el dueño debe poder verlo.
         const preciosDistintos = [];
 
+        // MODIFICADORES (BLOQUE 11). El catálogo se carga UNA vez por venta (va
+        // cacheado 60s) y se resuelve cada renglón contra él: el cliente manda
+        // qué opción eligió, nunca cuánto cuesta. Ver utils/modificadores.js.
+        const catalogoMods = await catalogoModificadores(biz);
+
         for (const item of items) {
             const productId = item.product_id || item.id;
             const product = await Product.findOne({
@@ -574,22 +685,54 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
             // si el dueño subió los precios mientras el equipo estaba sin red,
             // cobrarle de más al ticket ya entregado descuadra la caja.
             const precioCatalogo = parseFloat(product.price);
-            const { unitPrice, origen } = resolverPrecioUnitario(precioCatalogo, item.unit_price, esVentaDiferida);
-            if (!Number.isFinite(unitPrice) || unitPrice <= 0) {
+            // ⚠️ `item.unit_price` es el precio BASE del producto, sin extras. La
+            // comparación contra el catálogo tiene que hacerse aquí, antes de
+            // sumar los modificadores: si no, cada "extra queso" quedaría
+            // auditado como si el equipo hubiera cobrado un precio inventado.
+            const { unitPrice: precioBase, origen } = resolverPrecioUnitario(
+                precioCatalogo,
+                item.base_unit_price !== undefined ? item.base_unit_price : item.unit_price,
+                esVentaDiferida
+            );
+            if (!Number.isFinite(precioBase) || precioBase <= 0) {
                 await t.rollback();
                 return res.status(400).json({ error: `Precio inválido para el producto ${product.name || productId}` });
             }
-            if (origen === 'cliente' && precioDifiere(unitPrice, precioCatalogo)) {
+            if (origen === 'cliente' && precioDifiere(precioBase, precioCatalogo)) {
                 preciosDistintos.push({
                     producto: product.name,
-                    cobrado: unitPrice,
+                    cobrado: precioBase,
                     catalogo: Number.isFinite(precioCatalogo) ? precioCatalogo : null
                 });
             }
+
+            // MODIFICADORES: el delta sale de la base en una venta online y del
+            // congelado del POS en una diferida (§26). Un error solo bloquea
+            // online, donde el cajero puede volver a armar el producto.
+            const mods = resolverModificadores({
+                seleccion: item.modifiers,
+                productId: product.id,
+                catalogo: catalogoMods,
+                esVentaDiferida,
+            });
+            if (!mods.ok) {
+                await t.rollback();
+                return res.status(400).json({ error: mods.error });
+            }
+
+            // `unit_price` es lo que el cliente paga por unidad (base + extras),
+            // así que impuesto, descuentos, pagos y corte de caja siguen leyendo
+            // ese campo sin enterarse de que existen modificadores.
+            const unitPrice = precioConModificadores(precioBase, mods.modificadores);
             const subtotal = parseFloat((qty * unitPrice).toFixed(2));
             calculatedTotal += subtotal;
 
-            resolvedItems.push({ product, qty, unitPrice, subtotal, notes: item.notes || item.nota || '' });
+            resolvedItems.push({
+                product, qty, unitPrice, subtotal,
+                basePrice: precioBase,
+                modificadores: mods.modificadores,
+                notes: item.notes || item.nota || '',
+            });
         }
 
         calculatedTotal = parseFloat(calculatedTotal.toFixed(2));
@@ -756,19 +899,27 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
         // Se guardan los items creados en orden para poder traducir los
         // `item_indexes` de una división POR ITEMS a ids reales (ver utils/pagos.js).
         const itemsCreados = [];
-        for (const { product, qty, unitPrice, subtotal, notes: itemNotes } of resolvedItems) {
+        for (const { product, qty, unitPrice, subtotal, basePrice, modificadores, notes: itemNotes } of resolvedItems) {
             const itemCreado = await OrderItem.create({
                 order_id: order.id,
                 product_id: product.id,
                 quantity: qty,
                 unit_price: unitPrice,
                 subtotal,
-                notes: itemNotes
+                notes: itemNotes,
+                // Congelado (BLOQUE 11): reimprimir este ticket dentro de un mes
+                // debe mostrar lo que se cobró, aunque el extra haya cambiado de
+                // precio o el dueño lo haya borrado de la biblioteca.
+                base_unit_price: basePrice,
+                modifiers: modificadores.length ? JSON.stringify(modificadores) : null,
             }, { transaction: t });
             itemsCreados.push(itemCreado);
 
             // Descontar insumos según la receta del producto (si tiene receta)
             await descontarIngredientesDeReceta(product.id, qty, t, branchIdFinal);
+            // …y el ajuste de los modificadores: el queso extra sale del
+            // inventario, y la cebolla que no se puso vuelve a él.
+            await aplicarRecetaDeModificadores(modificadores, qty, t, branchIdFinal, -1);
         }
 
         // PAGOS DIVIDIDOS (BLOQUE 10). Van en la MISMA transacción que la venta:
@@ -931,6 +1082,10 @@ router.post('/:id/items', authenticate, async (req, res) => {
             }
         }
 
+        // Catálogo de modificadores (BLOQUE 11): una comanda que se agrega a una
+        // mesa lleva extras igual que una venta de mostrador.
+        const catalogoMods = await catalogoModificadores(biz);
+
         let additionalTotal = 0;
         for (const item of items) {
             const productId = item.product_id || item.id;
@@ -943,11 +1098,27 @@ router.post('/:id/items', authenticate, async (req, res) => {
                 return res.status(404).json({ error: `Producto ${productId} no encontrado` });
             }
             const qty = Math.max(1, parseInt(item.quantity) || 1);
-            const unitPrice = parseFloat(product.price);
-            if (!Number.isFinite(unitPrice) || unitPrice <= 0) {
+            const precioBase = parseFloat(product.price);
+            if (!Number.isFinite(precioBase) || precioBase <= 0) {
                 await t.rollback();
                 return res.status(400).json({ error: `Precio inválido para el producto ${product.name || productId}` });
             }
+
+            // Aquí NO hay venta diferida: agregar a una mesa siempre ocurre en
+            // línea (el pedido vive en el servidor), así que el delta sale
+            // siempre de la base.
+            const mods = resolverModificadores({
+                seleccion: item.modifiers,
+                productId: product.id,
+                catalogo: catalogoMods,
+                esVentaDiferida: false,
+            });
+            if (!mods.ok) {
+                await t.rollback();
+                return res.status(400).json({ error: mods.error });
+            }
+
+            const unitPrice = precioConModificadores(precioBase, mods.modificadores);
             const subtotal = parseFloat((qty * unitPrice).toFixed(2));
             additionalTotal += subtotal;
 
@@ -959,9 +1130,12 @@ router.post('/:id/items', authenticate, async (req, res) => {
                 subtotal,
                 notes: item.notes || '',
                 client_uuid: client_uuid || null,
+                base_unit_price: precioBase,
+                modifiers: mods.modificadores.length ? JSON.stringify(mods.modificadores) : null,
             }, { transaction: t });
 
             await descontarIngredientesDeReceta(product.id, qty, t, order.branch_id || null);
+            await aplicarRecetaDeModificadores(mods.modificadores, qty, t, order.branch_id || null, -1);
         }
 
         // El impuesto de la mesa se recalcula con la tasa CONGELADA del pedido,
@@ -1017,6 +1191,28 @@ router.delete('/:id/items/:itemId', authenticate, async (req, res) => {
             return res.status(404).json({ error: 'Item no encontrado' });
         }
 
+        // DEVOLVER LOS INSUMOS AL INVENTARIO.
+        //
+        // Agregar el producto a la mesa los descontó (POST /:id/items), así que
+        // quitarlo tiene que devolverlos. Sin esto, un mesero que se equivoca de
+        // plato y lo quita deja esos insumos descontados PARA SIEMPRE: el stock
+        // se va desviando en silencio, un plato a la vez, y nadie puede
+        // reconstruir por qué.
+        //
+        // Es exactamente lo que ya hace la cancelación del pedido completo
+        // (PUT /:id/status): la misma pareja descontar/restaurar, aplicada a un
+        // solo renglón. Solo se llega aquí con el pedido en 'registrado' —lo
+        // filtra la consulta de arriba—, que es la misma condición bajo la que
+        // se restaura al cancelar: el plato aún no se elaboró.
+        const qtyItem = Math.max(1, parseInt(item.quantity) || 1);
+        await restaurarIngredientesDeReceta(item.product_id, qtyItem, t, order.branch_id || null);
+        // Y el ajuste de los modificadores (§32.6), con el signo invertido: el
+        // queso extra vuelve al inventario y la cebolla que se había devuelto
+        // vuelve a salir.
+        await aplicarRecetaDeModificadores(
+            leerModificadores(item.modifiers), qtyItem, t, order.branch_id || null, +1
+        );
+
         await item.destroy({ transaction: t });
 
         const baseRestante = Math.max(0, parseFloat((baseParaRecalcular(order) - parseFloat(item.subtotal)).toFixed(2)));
@@ -1032,6 +1228,10 @@ router.delete('/:id/items/:itemId', authenticate, async (req, res) => {
         }, { transaction: t });
 
         await t.commit();
+        notificarOrders(biz);
+        // El stock cambió al devolver los insumos: sin este aviso, las pantallas
+        // abiertas seguirían mostrando el stock de antes hasta el próximo refresco.
+        notificarInventario(biz);
 
         res.json(await cargarPedidoConItems(order.id));
     } catch (error) {
@@ -1109,6 +1309,12 @@ router.put('/:id/status', authenticate, async (req, res) => {
             for (const item of itemsPedido) {
                 const qty = Math.max(1, parseInt(item.quantity) || 1);
                 await restaurarIngredientesDeReceta(item.product_id, qty, t, order.branch_id || null);
+                // …y deshacer el ajuste de los modificadores (BLOQUE 11): el queso
+                // extra vuelve al inventario, y la cebolla que se había devuelto
+                // vuelve a salir. Es la misma fórmula con el signo al revés.
+                await aplicarRecetaDeModificadores(
+                    leerModificadores(item.modifiers), qty, t, order.branch_id || null, +1
+                );
             }
         }
 
@@ -1327,6 +1533,13 @@ router.delete('/:id', authenticate, async (req, res) => {
         for (const item of order.items) {
             const qty = Math.max(1, parseInt(item.quantity) || 1);
             await restaurarIngredientesDeReceta(item.product_id, qty, t, order.branch_id || null);
+            // Y el ajuste de los modificadores (BLOQUE 11). Este alias tiene que
+            // hacer exactamente lo mismo que `PUT /:id/status`: si solo uno de
+            // los dos deshiciera los extras, el inventario dependería de por cuál
+            // de las dos rutas se canceló.
+            await aplicarRecetaDeModificadores(
+                leerModificadores(item.modifiers), qty, t, order.branch_id || null, +1
+            );
         }
 
         await order.update({ status: 'cancelado' }, { transaction: t });
