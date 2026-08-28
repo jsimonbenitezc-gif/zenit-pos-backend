@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const logger = require('../utils/logger');
-const { Order, OrderItem, OrderPayment, Product, Customer, Table, ProductRecipe, Ingredient, PreparationItem, PrivilegedActionLog, BranchStock, User, Discount, ModifierOptionRecipe, sequelize } = require('../models');
+const { Order, OrderItem, OrderPayment, Product, Customer, Table, ProductRecipe, Ingredient, Preparation, PreparationItem, PrivilegedActionLog, BranchStock, User, Discount, ModifierOptionRecipe, sequelize } = require('../models');
 const { authenticate } = require('../middleware/auth');
 const { autorizarAccionPrivilegiada } = require('../utils/verifyPin');
 const { resolverBranchId, BranchError } = require('../utils/branch');
@@ -12,6 +12,8 @@ const { resolverPagos } = require('../utils/pagos');
 const {
     resolverModificadores, catalogoModificadores, precioConModificadores, leerModificadores,
 } = require('../utils/modificadores');
+const { convertirCantidad } = require('../utils/unidades');
+const { fraccionDeTanda } = require('../utils/preparaciones');
 const { Op } = require('sequelize');
 const { notificarAudit } = require('./audit');
 const { enviarNotificacion, getPrefs } = require('../utils/push');
@@ -45,19 +47,11 @@ router.get('/events', (req, res) => {
     configurarSSE(_ordersClients, req, res);
 });
 
-// Factores de conversión entre unidades compatibles
-const FACTORES_CONVERSION = {
-    'g_kg': 0.001, 'kg_g': 1000,
-    'ml_l': 0.001, 'l_ml': 1000,
-    'ml_gal': 0.000264, 'gal_ml': 3785.41,
-    'l_gal': 0.26417, 'gal_l': 3.78541,
-};
-
+// Los factores de conversión viven en utils/unidades.js (BLOQUE 12): estaban
+// duplicados aquí y en routes/inventory.js. Este envoltorio se queda porque
+// todas las llamadas de este archivo pasan el INGREDIENTE, no su unidad.
 function convertirUnidad(cantidad, unidadReceta, ingrediente) {
-    if (!unidadReceta || unidadReceta === ingrediente.unit) return cantidad;
-    const clave = `${unidadReceta}_${ingrediente.unit}`;
-    if (FACTORES_CONVERSION[clave]) return cantidad * FACTORES_CONVERSION[clave];
-    return cantidad;
+    return convertirCantidad(cantidad, unidadReceta, ingrediente.unit);
 }
 
 // Helpers de stock por sucursal (lectura dual: tabla BranchStock primero, fallback JSON)
@@ -118,7 +112,10 @@ async function descontarIngredientesDeReceta(productId, qty, t, branchId = null)
                 // sobre el lado nullable (ingredients) de un LEFT OUTER JOIN.
                 lock: { level: t.LOCK.UPDATE, of: PreparationItem }
             });
-            const cantPrep = parseFloat(item.quantity) * qty;
+            const prep = await Preparation.findByPk(item.item_id, { transaction: t });
+                // El rinde manda: "0.5 de una salsa que rinde 4" consume 1/8
+                // de la tanda, no media tanda entera (ver utils/preparaciones.js).
+            const cantPrep = fraccionDeTanda(item.quantity, prep) * qty;
             for (const pi of prepItems) {
                 if (!pi.ingredient) continue;
                 const cantDescontar = convertirUnidad(parseFloat(pi.quantity), pi.unit_recipe, pi.ingredient) * cantPrep;
@@ -176,7 +173,8 @@ async function aplicarRecetaDeModificadores(modificadores, qty, t, branchId, sig
                 // OUTER JOIN: se bloquea solo preparation_items (§19.25).
                 lock: { level: t.LOCK.UPDATE, of: PreparationItem },
             });
-            const cantPrep = parseFloat(ajuste.quantity) * qty * veces;
+            const prep = await Preparation.findByPk(ajuste.item_id, { transaction: t });
+            const cantPrep = fraccionDeTanda(ajuste.quantity, prep) * qty * veces;
             for (const pi of prepItems) {
                 if (!pi.ingredient) continue;
                 const delta = convertirUnidad(parseFloat(pi.quantity), pi.unit_recipe, pi.ingredient) * cantPrep;
@@ -217,7 +215,8 @@ async function acumularRequerimientosDeModificadores(modificadores, qty, requeri
                 include: [{ model: Ingredient, as: 'ingredient' }],
                 transaction: t,
             });
-            const cantPrep = parseFloat(ajuste.quantity) * qty * veces;
+            const prep = await Preparation.findByPk(ajuste.item_id, { transaction: t });
+            const cantPrep = fraccionDeTanda(ajuste.quantity, prep) * qty * veces;
             for (const pi of prepItems) {
                 if (!pi.ingredient) continue;
                 const cantReq = convertirUnidad(parseFloat(pi.quantity), pi.unit_recipe, pi.ingredient) * cantPrep;
@@ -251,7 +250,8 @@ async function acumularRequerimientosDeProducto(productId, qty, requerimientos, 
                 include: [{ model: Ingredient, as: 'ingredient' }],
                 transaction: t
             });
-            const cantPrep = parseFloat(item.quantity) * qty;
+            const prep = await Preparation.findByPk(item.item_id, { transaction: t });
+            const cantPrep = fraccionDeTanda(item.quantity, prep) * qty;
             for (const pi of prepItems) {
                 if (!pi.ingredient) continue;
                 const cantReq = convertirUnidad(parseFloat(pi.quantity), pi.unit_recipe, pi.ingredient) * cantPrep;
@@ -314,7 +314,9 @@ async function restaurarIngredientesDeReceta(productId, qty, t, branchId = null)
                 // sobre el lado nullable (ingredients) de un LEFT OUTER JOIN.
                 lock: { level: t.LOCK.UPDATE, of: PreparationItem }
             });
-            const cantPrep = parseFloat(item.quantity) * qty;
+            const prep = await Preparation.findByPk(item.item_id, { transaction: t });
+            // MISMO factor que al descontar, o restaurar devolvería otra cantidad.
+            const cantPrep = fraccionDeTanda(item.quantity, prep) * qty;
             for (const pi of prepItems) {
                 if (!pi.ingredient) continue;
                 const cantRestaurar = convertirUnidad(parseFloat(pi.quantity), pi.unit_recipe, pi.ingredient) * cantPrep;

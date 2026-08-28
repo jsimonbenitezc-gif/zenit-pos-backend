@@ -5,6 +5,8 @@ const { Order, OrderItem, Product, Customer, Ingredient, BranchStock, sequelize 
 const { authenticate } = require('../middleware/auth');
 const { Op } = require('sequelize');
 const { filtroVentaContable } = require('../utils/ordersFilter');
+const { requirePremium } = require('../middleware/checkPlan');
+const { mapaDeCostos, costoDeModificadores, centavos } = require('../utils/costos');
 const {
     zonaDelNegocio, inicioDiaLocal, inicioDiaLocalISO,
     sqlFechaLocal, sqlHoraLocal, sqlMesLocal
@@ -414,6 +416,220 @@ router.get('/products', authenticate, async (req, res) => {
 
         res.json(productStats);
     } catch (error) {
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// ── RENTABILIDAD POR PRODUCTO (BLOQUE 12) ────────────────────────────────────
+//
+// Cruza lo que se vendió con lo que costó producirlo. El costo NO está guardado
+// en ninguna columna: sale de la receta del producto (utils/costos.js).
+//
+// ⚠️ EL INGRESO QUE SE COMPARA CONTRA EL COSTO ES **NETO**, no lo cobrado.
+// Un renglón de $116 con IVA incluido no dejó $116: dejó $100, porque $16 son
+// del fisco. Y si la venta llevaba descuento, el producto tampoco dejó su precio
+// de lista. Los dos ajustes se hacen con UN SOLO factor por pedido:
+//
+//     factor = (subtotal del pedido) / (suma de los renglones)
+//
+// porque Order.subtotal es, por definición del BLOQUE 8, la base gravable ya sin
+// descuentos y sin impuesto. En modo INCLUIDO el factor quita impuesto y
+// descuento de una vez; en modo AGREGADO el impuesto nunca estuvo en el renglón
+// y el factor solo quita el descuento. Un pedido anterior al BLOQUE 8 tiene
+// subtotal NULL y ahí su total ES lo cobrado, así que se usa ese.
+//
+// Sin este factor, encender el impuesto en modo INCLUIDO —el modo por defecto—
+// inflaría el margen de todos los platillos de golpe.
+//
+// La propina (BLOQUE 9) no entra: no es ingreso del negocio.
+router.get('/profitability', authenticate, requirePremium, async (req, res) => {
+    try {
+        const biz = req.user.business_id;
+        const { date_from, date_to, order_by, limit } = req.query;
+        const tz = await zonaDelNegocio(biz);
+
+        // Rango. Sin fechas: los últimos 30 días LOCALES del negocio (incluido
+        // hoy). Es un reporte para decidir el menú de la semana, no un archivo
+        // histórico: leer "todo" de un negocio con años de ventas traería
+        // cientos de miles de renglones a memoria.
+        let desde = null, hasta = null;
+        if (date_from || date_to) {
+            const rango = rangoFechas(tz, date_from, date_to);
+            const c = rango.createdAt || {};
+            desde = c[Op.gte] || null;
+            hasta = c[Op.lt] || c[Op.lte] || null;
+        }
+        if (!desde) desde = inicioDiaLocal(tz, new Date(), -29);
+        if (!hasta) hasta = inicioDiaLocal(tz, new Date(), 1);
+
+        const dias = (hasta - desde) / 86400000;
+        if (dias <= 0) {
+            return res.status(400).json({ error: 'La fecha inicial debe ser anterior a la final.' });
+        }
+        if (dias > 366) {
+            return res.status(400).json({ error: 'El periodo no puede ser mayor a un año. Elige un rango más corto.' });
+        }
+
+        const orderWhere = {
+            business_id: biz,
+            createdAt: { [Op.gte]: desde, [Op.lt]: hasta },
+            ...filtroVentaContable()
+        };
+        // Sucursal: igual que el dashboard, sin branch_id se ven todas.
+        if (req.query.branch_id) orderWhere.branch_id = parseInt(req.query.branch_id);
+
+        // Un solo barrido de renglones. Se traen los modificadores porque el
+        // extra que se cobró también consumió insumos (BLOQUE 11) y sin ellos el
+        // "extra queso" parecería margen puro.
+        const renglones = await OrderItem.findAll({
+            attributes: ['order_id', 'product_id', 'quantity', 'subtotal', 'modifiers'],
+            include: [
+                {
+                    model: Order,
+                    as: 'order',
+                    where: orderWhere,
+                    attributes: ['id', 'subtotal', 'total']
+                },
+                {
+                    // Sin `image`: son data-URIs base64 y el reporte dibuja el
+                    // emoji (§23 de CLAUDE.md).
+                    model: Product,
+                    as: 'product',
+                    attributes: ['id', 'name', 'emoji'],
+                    required: false
+                }
+            ],
+            raw: true,
+            nest: true
+        });
+
+        // Factor neto por pedido (ver el comentario de arriba).
+        const brutoPorPedido = new Map();
+        for (const r of renglones) {
+            const id = Number(r.order_id);
+            brutoPorPedido.set(id, (brutoPorPedido.get(id) || 0) + (parseFloat(r.subtotal) || 0));
+        }
+        const factorPorPedido = new Map();
+        for (const r of renglones) {
+            const id = Number(r.order_id);
+            if (factorPorPedido.has(id)) continue;
+            const bruto = brutoPorPedido.get(id) || 0;
+            const neto = (r.order.subtotal !== null && r.order.subtotal !== undefined)
+                ? parseFloat(r.order.subtotal)
+                : parseFloat(r.order.total);
+            // Un pedido sin renglones cobrables (o con números raros) se deja
+            // tal cual en vez de dividir por cero: el reporte no puede reventar.
+            factorPorPedido.set(id, (bruto > 0 && Number.isFinite(neto)) ? neto / bruto : 1);
+        }
+
+        const costos = await mapaDeCostos(biz);
+
+        const acumulado = new Map();
+        for (const r of renglones) {
+            const productId = Number(r.product_id);
+            const qty = parseInt(r.quantity) || 0;
+            const factor = factorPorPedido.has(Number(r.order_id)) ? factorPorPedido.get(Number(r.order_id)) : 1;
+
+            let fila = acumulado.get(productId);
+            if (!fila) {
+                const info = costos.productos.get(productId) || {
+                    costo: null, completo: false, faltantes: [], sin_receta: true
+                };
+                fila = {
+                    product_id: productId,
+                    nombre: (r.product && r.product.name) || 'Producto eliminado',
+                    emoji: (r.product && r.product.emoji) || '',
+                    unidades: 0,
+                    ingreso: 0,
+                    costo: 0,
+                    sin_receta: info.sin_receta,
+                    costo_confiable: info.sin_receta ? false : info.completo,
+                    insumos_sin_costo: new Set(info.faltantes),
+                    _costoUnitarioReceta: info.costo
+                };
+                acumulado.set(productId, fila);
+            }
+
+            fila.unidades += qty;
+            fila.ingreso += (parseFloat(r.subtotal) || 0) * factor;
+
+            if (!fila.sin_receta) {
+                fila.costo += (fila._costoUnitarioReceta || 0) * qty;
+                const extras = costoDeModificadores(r.modifiers, costos.opciones);
+                fila.costo += extras.costo * qty;
+                if (extras.faltantes.length) {
+                    extras.faltantes.forEach(f => fila.insumos_sin_costo.add(f));
+                    fila.costo_confiable = false;
+                }
+            }
+        }
+
+        // Formateo. Un producto SIN receta se devuelve con costo/margen en null,
+        // nunca en 0: un margen del 100% inventado es peor que un hueco visible.
+        const productos = [...acumulado.values()].map(f => {
+            const ingreso = centavos(f.ingreso);
+            if (f.sin_receta) {
+                return {
+                    product_id: f.product_id, nombre: f.nombre, emoji: f.emoji,
+                    unidades: f.unidades, ingreso,
+                    costo: null, costo_unitario: null, margen: null, margen_pct: null,
+                    sin_receta: true, costo_confiable: false, insumos_sin_costo: []
+                };
+            }
+            const costo = centavos(f.costo);
+            const margen = centavos(ingreso - costo);
+            return {
+                product_id: f.product_id, nombre: f.nombre, emoji: f.emoji,
+                unidades: f.unidades, ingreso, costo,
+                costo_unitario: centavos(f._costoUnitarioReceta || 0),
+                margen,
+                // Sobre el INGRESO (margen comercial), no sobre el costo. Es la
+                // lectura que le sirve al dueño: "de cada $100 que entran por
+                // este platillo, me quedan $X".
+                margen_pct: ingreso > 0 ? Math.round((margen / ingreso) * 1000) / 10 : null,
+                sin_receta: false,
+                costo_confiable: f.costo_confiable,
+                insumos_sin_costo: [...f.insumos_sin_costo]
+            };
+        });
+
+        // Orden. Por defecto el margen en DINERO: el platillo que más deja al
+        // negocio no es el del mayor porcentaje, es el que más veces se vende.
+        const criterios = {
+            margen:     (a, b) => (b.margen === null ? -Infinity : b.margen) - (a.margen === null ? -Infinity : a.margen),
+            margen_pct: (a, b) => (b.margen_pct === null ? -Infinity : b.margen_pct) - (a.margen_pct === null ? -Infinity : a.margen_pct),
+            ingreso:    (a, b) => b.ingreso - a.ingreso,
+            unidades:   (a, b) => b.unidades - a.unidades
+        };
+        productos.sort(criterios[order_by] || criterios.margen);
+
+        const conCosto = productos.filter(p => !p.sin_receta);
+        const insumosSinCosto = new Set();
+        conCosto.forEach(p => p.insumos_sin_costo.forEach(i => insumosSinCosto.add(i)));
+
+        const ingresoTotal = centavos(conCosto.reduce((s, p) => s + p.ingreso, 0));
+        const costoTotal = centavos(conCosto.reduce((s, p) => s + p.costo, 0));
+        const margenTotal = centavos(ingresoTotal - costoTotal);
+
+        const tope = limit ? Math.max(1, parseInt(limit)) : null;
+
+        res.json({
+            periodo: { desde, hasta, tz },
+            // El resumen SOLO suma los productos con receta: mezclar los que no
+            // la tienen daría un margen que parece del negocio entero sin serlo.
+            resumen: {
+                ingreso: ingresoTotal,
+                costo: costoTotal,
+                margen: margenTotal,
+                margen_pct: ingresoTotal > 0 ? Math.round((margenTotal / ingresoTotal) * 1000) / 10 : null,
+                productos_con_receta: conCosto.length,
+                productos_sin_receta: productos.length - conCosto.length,
+                insumos_sin_costo: [...insumosSinCosto]
+            },
+            productos: tope ? productos.slice(0, tope) : productos
+        });
+    } catch (error) {
+        logger.error('Profitability stats error:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });

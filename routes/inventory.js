@@ -20,6 +20,8 @@ const { configurarSSE } = require('../utils/sse');
 const { notificarAudit } = require('./audit');
 const { enviarNotificacion } = require('../utils/push');
 const { paginate, paginatedResponse } = require('../utils/pagination');
+const { convertirCantidad } = require('../utils/unidades');
+const { fraccionDeTanda } = require('../utils/preparaciones');
 
 // ── Helper: lectura dual BranchStock (tabla primero, fallback JSON) ──────────
 async function getBranchStockFromTable(ingredientId, branchId) {
@@ -40,22 +42,10 @@ async function getAllBranchStocksFromTable(ingredientId) {
     return map;
 }
 
-const UNIT_CONVERSION = {
-    'kg_g': 1000,
-    'g_kg': 0.001,
-    'l_ml': 1000,
-    'ml_l': 0.001,
-    'ml_gal': 0.000264,
-    'gal_ml': 3785.41,
-    'l_gal': 0.26417,
-    'gal_l': 3.78541,
-};
-
-function convertUnit(qty, fromUnit, toUnit) {
-    if (!fromUnit || !toUnit || fromUnit === toUnit) return qty;
-    const key = `${fromUnit}_${toUnit}`;
-    return UNIT_CONVERSION[key] ? qty * UNIT_CONVERSION[key] : qty;
-}
+// La tabla de conversión vive en utils/unidades.js (BLOQUE 12): estaba duplicada
+// aquí y en routes/orders.js. Si las dos copias se desviaban, el sistema
+// descontaba una cantidad del inventario y costeaba otra.
+const convertUnit = convertirCantidad;
 
 // ── SSE: notificaciones en tiempo real de cambios en inventario ────────────────
 const _invClients = new Map(); // businessId (string) → Set<Response>
@@ -103,6 +93,17 @@ router.get('/products-stock', authenticate, async (req, res) => {
             : [];
         const ingMap = {};
         for (const ing of ings) ingMap[ing.id] = ing;
+
+        // Rinde de cada preparación: hace falta para saber qué fracción de la
+        // tanda consume una receta (ver utils/preparaciones.js).
+        const prepYieldMap = {};
+        if (prepIds.length > 0) {
+            const preps = await Preparation.findAll({
+                where: { id: { [Op.in]: prepIds }, business_id: biz },
+                attributes: ['id', 'yield_quantity'],
+            });
+            for (const pr of preps) prepYieldMap[pr.id] = pr;
+        }
 
         const prepItemsMap = {};
         if (prepIds.length > 0) {
@@ -154,7 +155,9 @@ router.get('/products-stock', authenticate, async (req, res) => {
                     if (possible < min) min = possible;
                 } else if (item.item_type === 'preparation') {
                     const pItems = prepItemsMap[item.item_id] || [];
-                    const qtyPrep = parseFloat(item.quantity);
+                    // El rinde manda (ver utils/preparaciones.js): sin esto, la
+                    // disponibilidad decía que alcanzaba para muchos menos platos.
+                    const qtyPrep = fraccionDeTanda(item.quantity, prepYieldMap[item.item_id]);
                     for (const pi of pItems) {
                         if (!pi.ingredient) continue;
                         const needed = convertUnit(parseFloat(pi.quantity), pi.unit_recipe, pi.ingredient.unit) * qtyPrep;
