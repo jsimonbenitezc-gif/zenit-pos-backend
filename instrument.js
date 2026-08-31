@@ -28,6 +28,10 @@ const sentryActivo = Boolean(DSN);
 const camposSensibles = [
     'password', 'pin', 'currentPassword', 'newPassword',
     'refreshToken', 'refresh_token', 'token', 'accessToken', 'kdsToken',
+    // BLOQUE 13: el secreto de una pantalla de cocina ES su credencial, y no
+    // caduca nunca. Un error al registrar un dispositivo lleva el secreto en el
+    // body: sin esto, saldría íntegro hacia Sentry.
+    'device_secret',
 ];
 
 function sanitizarObjeto(valor) {
@@ -57,14 +61,15 @@ function sanitizarEventoSentry(event) {
             event.request.data = '[OMITIDO]';
         }
     }
-    // La query string lleva tokens (SSE legacy `?token=`, KDS `?token=`)
+    // La query string lleva credenciales: el `?token=` legacy del SSE y el
+    // `?pair=` del KDS (que no da acceso por sí solo, pero permite pedirlo).
     if (typeof event.request.query_string === 'string') {
         event.request.query_string = event.request.query_string
-            .replace(/((?:^|&)(?:token|ticket|kdsToken)=)[^&]*/gi, '$1[REDACTADO]');
+            .replace(/((?:^|&)(?:token|ticket|kdsToken|pair)=)[^&]*/gi, '$1[REDACTADO]');
     }
     if (typeof event.request.url === 'string') {
         event.request.url = event.request.url
-            .replace(/([?&](?:token|ticket|kdsToken)=)[^&]*/gi, '$1[REDACTADO]');
+            .replace(/([?&](?:token|ticket|kdsToken|pair)=)[^&]*/gi, '$1[REDACTADO]');
     }
     return event;
 }

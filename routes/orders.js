@@ -420,6 +420,13 @@ router.get('/', authenticate, async (req, res) => {
         if (order_type) where.order_type = order_type;
         if (payment_method) where.payment_method = payment_method;
         if (req.query.branch_id) where[Op.and] = [{ [Op.or]: [{ branch_id: parseInt(req.query.branch_id) }, { branch_id: null }] }];
+        // Una pantalla de cocina ve SOLO la sucursal para la que fue aprobada
+        // (BLOQUE 13). La sucursal la pone el DISPOSITIVO, nunca la URL: la URL
+        // la controla quien tenga la tablet en la mano, y con ella podría
+        // asomarse a la cocina de otra sucursal cambiando un número.
+        if (req.user.esKds && req.user.branch_id) {
+            where[Op.and] = [{ [Op.or]: [{ branch_id: req.user.branch_id }, { branch_id: null }] }];
+        }
         if (date_from || date_to) {
             where.createdAt = {};
             if (date_from) where.createdAt[Op.gte] = new Date(date_from);

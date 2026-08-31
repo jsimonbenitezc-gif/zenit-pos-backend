@@ -19,6 +19,7 @@ const { limpiarCacheUsuarios } = require('../middleware/auth');
 const { limpiarCacheImpuestos } = require('../utils/impuestos');
 const { limpiarCachePropinas } = require('../utils/propinas');
 const { limpiarCacheModificadores } = require('../utils/modificadores');
+const { limpiarCacheDispositivos, limpiarCodigosEmparejamiento } = require('../utils/kdsDevices');
 
 // ── App Express ligera (sin Sentry, CORS, helmet, cron) ──
 // El límite del body y el manejador de errores son los MISMOS que en server.js,
@@ -38,6 +39,7 @@ app.use('/api/stats',      require('../routes/stats'));
 app.use('/api/settings',   require('../routes/settings'));
 app.use('/api/turnos',     require('../routes/turnos'));
 app.use('/api/tables',     require('../routes/tables'));
+app.use('/api/kds',        require('../routes/kds'));
 
 app.use(manejadorDeErrores);
 
@@ -70,6 +72,11 @@ async function initTestDb() {
     limpiarCacheImpuestos();
     limpiarCachePropinas();
     limpiarCacheModificadores();
+    // Los dispositivos del KDS se cachean por el hash del secreto, y los tests
+    // reutilizan los mismos secretos: sin esto, un test leería el dispositivo
+    // (y el negocio) del test anterior.
+    limpiarCacheDispositivos();
+    limpiarCodigosEmparejamiento();
 }
 
 // ── Helper: crear usuario owner con JWT ──────────────────

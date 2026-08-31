@@ -180,8 +180,15 @@ describe('Puente logger → Sentry (Bloque 6.1)', () => {
 
 describe('Operación del piloto (Bloque 6.6)', () => {
 
-    test('el token del KDS dura un turno completo (12h)', () => {
-        expect(fuenteServer).toMatch(/expiresIn: '12h'/);
+    // Este test afirmaba que el pase del KDS duraba 12 h ("no lo bajes: obliga a
+    // re-escanear el QR en hora pico"). El BLOQUE 13 fue más lejos y lo ELIMINÓ:
+    // la seguridad ya no la da la vida del pase sino el dispositivo aprobado y
+    // revocable. Lo que hay que vigilar ahora es que nadie vuelva a meter una
+    // credencial en la URL del KDS — que es como nació la llave maestra del §19.13.
+    test('la pantalla de cocina ya no se abre con un pase que caduca (BLOQUE 13)', () => {
+        expect(fuenteServer).not.toMatch(/purpose: 'kds'/);
+        expect(fuenteServer).not.toMatch(/\/api\/kds\/token/);
+        expect(fuenteServer).toMatch(/app\.use\('\/api\/kds'/);
     });
 
     test('/health consulta la base y responde 503 si está caída (sirve para el monitor externo)', () => {

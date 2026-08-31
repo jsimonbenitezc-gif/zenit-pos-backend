@@ -36,6 +36,15 @@
     .btn-listo:hover{background:#059669}
     .empty{grid-column:1/-1;text-align:center;padding:80px 20px}
     .empty p{font-size:1.2em;color:#4b5563;margin-top:12px}
+    /* Panel de emparejamiento (BLOQUE 13): lo que se ve mientras esta pantalla
+       todavía no tiene permiso para ver los pedidos. */
+    .aviso{max-width:520px;margin:60px auto;background:#1f2937;border:2px solid #374151;border-radius:14px;padding:32px 28px;text-align:center}
+    .aviso h2{font-size:1.3em;margin-bottom:10px}
+    .aviso p{color:#9ca3af;line-height:1.5;margin-bottom:8px}
+    .aviso .grande{font-size:2.2em;font-weight:800;letter-spacing:4px;color:#818cf8;margin:18px 0;font-variant-numeric:tabular-nums}
+    .aviso .pulso{display:inline-block;width:10px;height:10px;border-radius:50%;background:#f59e0b;margin-right:8px;animation:latir 1.4s infinite}
+    @keyframes latir{0%,100%{opacity:1}50%{opacity:0.25}}
+    .aviso button{margin-top:18px;padding:10px 22px;border:1px solid #4b5563;background:none;color:#d1d5db;border-radius:8px;font-size:0.9em;cursor:pointer}
   </style>
 </head>
 <body>
@@ -46,22 +55,76 @@
 </header>
 <div id="grid"></div>
 <script>
+  // ── IDENTIDAD DE ESTA PANTALLA (BLOQUE 13) ────────────────────────────────
+  // Antes la credencial venía en la URL (?token=), así que el QR ERA la llave:
+  // fotografiarlo daba 12 h de acceso y no había forma de cortarlo. Ahora la
+  // pantalla genera SU PROPIO secreto, lo guarda aquí y solo sirve de algo
+  // cuando alguien la aprueba con el PIN del negocio.
+  //
+  // El secreto vive en localStorage y no se comparte con nadie: la URL solo
+  // lleva un código de emparejamiento de un solo uso (?pair=), que caduca en
+  // 10 minutos y lo único que consigue es dejar la pantalla "pendiente".
   const params    = new URLSearchParams(window.location.search);
-  const TOKEN     = params.get('token') || '';
-  const BRANCH_ID = params.get('branch_id') || '';
+  const PAIR_CODE = (params.get('pair') || '').trim().toUpperCase();
   const API       = '/api';
+  const CLAVE_SECRETO = 'zenit_kds_secret';
   let orders  = [];
+  let BRANCH_ID = '';
+  let estadoDispositivo = 'desconocido';
+  let temporizadorPedidos = null;
+
+  function secretoGuardado() {
+    try { return localStorage.getItem(CLAVE_SECRETO) || ''; } catch { return ''; }
+  }
+
+  function guardarSecreto(s) {
+    try { localStorage.setItem(CLAVE_SECRETO, s); } catch {}
+  }
+
+  // Se olvida el secreto cuando el servidor dice que esta pantalla ya no vale
+  // (revocada, o borrada de la lista). Sin esto la tablet se quedaría reintentando
+  // con una credencial muerta y el dueño no podría volver a emparejarla.
+  function olvidarSecreto() {
+    try { localStorage.removeItem(CLAVE_SECRETO); } catch {}
+  }
+
+  function generarSecreto() {
+    try {
+      if (window.crypto && crypto.randomUUID) return 'd-' + crypto.randomUUID();
+      var b = new Uint8Array(24); crypto.getRandomValues(b);
+      return 'd-' + Array.from(b).map(function(x){ return x.toString(16).padStart(2,'0'); }).join('');
+    } catch {
+      // Último recurso (navegador viejo sin WebCrypto): peor entropía, pero el
+      // secreto igual no da acceso hasta que una persona lo apruebe con PIN.
+      return 'd-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+    }
+  }
+
+  function tokenDispositivo() {
+    var s = secretoGuardado();
+    return s ? 'zkds_' + s : '';
+  }
 
   // Comandas marcadas como listas en cocina (persisten mientras la página esté abierta)
   // No cambian el status del backend — la mesa sigue activa hasta que el cajero cobra.
   const dismissed = new Set(JSON.parse(sessionStorage.getItem('kds_ok') || '[]'));
 
   async function cargar() {
+    if (estadoDispositivo !== 'activo') return;
     try {
       const branchQ = BRANCH_ID ? '&branch_id=' + BRANCH_ID : '';
       const r = await fetch(API + '/orders?status=registrado&limit=100' + branchQ, {
-        headers: { 'Authorization': 'Bearer ' + TOKEN }
+        headers: { 'Authorization': 'Bearer ' + tokenDispositivo() }
       });
+      // 401/403 = a esta pantalla le cortaron el acceso mientras estaba abierta.
+      // Es EL caso que este bloque vino a resolver: la tablet perdida deja de
+      // ver la cocina en el momento, no cuando venza un pase.
+      if (r.status === 401 || r.status === 403) {
+        estadoDispositivo = 'revocado';
+        olvidarSecreto();
+        pintarEstado();
+        return;
+      }
       if (!r.ok) throw new Error();
       const data = await r.json();
       const todas = Array.isArray(data) ? data : (data.data || data.orders || data.rows || []);
@@ -146,8 +209,129 @@
     document.getElementById('reloj').textContent = new Date().toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit'});
   }
 
-  cargar();
-  setInterval(cargar, 15000);
+  // ── EMPAREJAMIENTO Y ESTADO (BLOQUE 13) ───────────────────────────────────
+
+  function pintarEstado() {
+    var grid = document.getElementById('grid');
+    var dot  = document.getElementById('dot');
+    var txt  = document.getElementById('status-text');
+
+    if (estadoDispositivo === 'activo') { dot.className = 'dot'; return; }
+
+    dot.className = 'dot error';
+
+    if (estadoDispositivo === 'pendiente') {
+      txt.textContent = 'Esperando aprobación';
+      grid.innerHTML = '<div class="aviso">' +
+        '<h2><span class="pulso"></span>Esperando aprobación</h2>' +
+        '<p>Esta pantalla ya pidió permiso. Apruébala desde Zenit en' +
+        ' <b>Ajustes → Pantallas de cocina</b>: te va a pedir tu PIN.</p>' +
+        '<p style="font-size:0.85em;margin-top:14px;">Se conecta sola en cuanto la autoricen.</p>' +
+        '</div>';
+      return;
+    }
+
+    if (estadoDispositivo === 'revocado') {
+      txt.textContent = 'Sin acceso';
+      grid.innerHTML = '<div class="aviso">' +
+        '<h2>Esta pantalla ya no tiene acceso</h2>' +
+        '<p>Se le retiró el permiso desde la app. Para volver a usarla, genera un' +
+        ' código nuevo en <b>Ajustes → Pantallas de cocina → Agregar pantalla</b>' +
+        ' y escánealo con este dispositivo.</p>' +
+        '<button onclick="location.reload()">Reintentar</button>' +
+        '</div>';
+      return;
+    }
+
+    // Sin secreto y sin código: alguien abrió la URL a pelo.
+    txt.textContent = 'Sin emparejar';
+    grid.innerHTML = '<div class="aviso">' +
+      '<h2>Pantalla sin emparejar</h2>' +
+      '<p>Abre Zenit en <b>Ajustes → Pantallas de cocina → Agregar pantalla</b>' +
+      ' y escanea el código con este dispositivo.</p>' +
+      '<p style="font-size:0.85em;margin-top:14px;">El código dura 10 minutos y sirve una sola vez.</p>' +
+      '</div>';
+  }
+
+  /** Consulta el estado propio. Es también como la pantalla se entera de que la aprobaron. */
+  async function consultarEstado() {
+    if (!secretoGuardado()) return 'sin_emparejar';
+    try {
+      var r = await fetch(API + '/kds/devices/me', {
+        headers: { 'Authorization': 'Bearer ' + tokenDispositivo() }
+      });
+      if (r.status === 404) { olvidarSecreto(); return 'sin_emparejar'; }
+      if (!r.ok) return estadoDispositivo;   // fallo de red: no se cambia nada
+      var d = await r.json();
+      if (d.branch_id) BRANCH_ID = String(d.branch_id);
+      return d.estado || 'desconocido';
+    } catch {
+      return estadoDispositivo;              // sin red: se conserva lo que había
+    }
+  }
+
+  /** Registra esta pantalla con el código de un solo uso que trae la URL. */
+  async function emparejar() {
+    var secreto = secretoGuardado();
+    if (!secreto) { secreto = generarSecreto(); guardarSecreto(secreto); }
+    try {
+      var r = await fetch(API + '/kds/devices/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ codigo: PAIR_CODE, device_secret: secreto, nombre: nombreSugerido() })
+      });
+      var d = await r.json().catch(function(){ return {}; });
+      if (r.status === 403 && d.estado === 'revocado') {
+        // El secreto de esta pantalla pertenece a un equipo revocado: se tira y
+        // se empieza de cero, para que la fila revocada quede como historial.
+        olvidarSecreto();
+        guardarSecreto(generarSecreto());
+        return emparejar();
+      }
+      if (!r.ok) { olvidarSecreto(); return 'sin_emparejar'; }
+      return d.estado || 'pendiente';
+    } catch {
+      return 'sin_emparejar';
+    }
+  }
+
+  /** Un nombre que el dueño pueda reconocer al aprobar ("la tablet de la barra"). */
+  function nombreSugerido() {
+    var ua = navigator.userAgent || '';
+    if (/iPad/i.test(ua)) return 'iPad de cocina';
+    if (/Android/i.test(ua) && !/Mobile/i.test(ua)) return 'Tablet de cocina';
+    if (/Android|iPhone/i.test(ua)) return 'Teléfono de cocina';
+    return 'Pantalla de cocina';
+  }
+
+  async function arrancar() {
+    if (PAIR_CODE) {
+      estadoDispositivo = await emparejar();
+      // El código se consume al usarlo: se limpia de la URL para que recargar la
+      // página no intente gastarlo otra vez (y para que no quede a la vista).
+      try { history.replaceState(null, '', location.pathname); } catch {}
+    } else {
+      estadoDispositivo = await consultarEstado();
+    }
+    pintarEstado();
+    if (estadoDispositivo === 'activo') cargar();
+  }
+
+  // Mientras espera la aprobación pregunta cada 5 s (el dueño está tecleando el
+  // PIN justo al lado); ya activa, el ritmo normal de la cocina es 15 s.
+  setInterval(async function () {
+    if (estadoDispositivo === 'activo') return;
+    if (estadoDispositivo === 'revocado') return;
+    var antes = estadoDispositivo;
+    estadoDispositivo = await consultarEstado();
+    if (estadoDispositivo !== antes) {
+      pintarEstado();
+      if (estadoDispositivo === 'activo') cargar();
+    }
+  }, 5000);
+
+  arrancar();
+  temporizadorPedidos = setInterval(cargar, 15000);
   actualizarReloj();
   setInterval(actualizarReloj, 10000);
   setInterval(function(){ if(orders.length) renderAll(); }, 60000);

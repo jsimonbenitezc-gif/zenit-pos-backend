@@ -97,42 +97,20 @@ app.get('/billing-return', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'billing-return.html'));
 });
 
-// ─── POST /api/kds/token — Generar token corto para KDS (2h) ─────────────────
-const { authenticate } = require('./middleware/auth');
-app.post('/api/kds/token', authenticate, (req, res) => {
-    const jwt = require('jsonwebtoken');
-    const { branch_id } = req.body;
-    const kdsToken = jwt.sign(
-        {
-            business_id: req.user.business_id,
-            branch_id: branch_id || req.user.branch_id || null,
-            purpose: 'kds'
-        },
-        process.env.JWT_SECRET,
-        // 12h = un turno completo. Antes eran 2h, lo que obligaba a re-escanear el QR
-        // en plena hora pico. Ampliarlo es seguro AHORA porque el middleware `authenticate`
-        // acota estos tokens a la lectura de la cola de cocina y nada más; con el token
-        // sin acotar, 12h habría sido una llave maestra de medio día.
-        // La solución definitiva (aprobación de dispositivos con PIN y revocación) está
-        // en PLAN_ARREGLOS_V5.md → BLOQUE 13.
-        { expiresIn: '12h' }
-    );
-    res.json({ kdsToken });
-});
-
-// ─── GET /kds?token=<kdsToken>  ───────────────────────────────────────────────
-// Página web del KDS. Ahora usa un kdsToken de corta duración (2h) en vez del JWT completo.
+// ─── GET /kds — Página web de la pantalla de cocina ──────────────────────────
+// BLOQUE 13: ya NO hay token en la URL. Antes esta página exigía un JWT de 12 h
+// que viajaba dentro del QR, así que el código ERA la credencial: fotografiarlo
+// daba medio día de acceso y no había forma de cortarlo antes de que venciera.
+//
+// Ahora la página no lleva credencial ninguna —no muestra datos por sí sola— y
+// la confianza vive en el DISPOSITIVO: la tablet genera su secreto, se registra
+// con un código de un solo uso (`?pair=`) y no lee un solo pedido hasta que
+// alguien la aprueba tecleando el PIN. Ver routes/kds.js y utils/kdsDevices.js.
+//
+// Servirla sin verificar nada es correcto y deliberado: lo que hay que proteger
+// son los datos, y esos los pide el navegador con el secreto del dispositivo,
+// que `middleware/auth.js` valida contra su estado en CADA petición.
 app.get('/kds', (req, res) => {
-    const { token } = req.query;
-    if (!token) return res.status(401).send('<h1>Token requerido. Escanea el QR desde la app.</h1>');
-    try {
-        const decoded = require('jsonwebtoken').verify(token, process.env.JWT_SECRET);
-        if (decoded.purpose !== 'kds') {
-            return res.status(401).send('<h1>Token inválido. Genera un nuevo QR desde la app.</h1>');
-        }
-    } catch {
-        return res.status(401).send('<h1>Token inválido o expirado. Genera un nuevo QR desde la app.</h1>');
-    }
     res.sendFile(path.join(__dirname, 'public', 'kds.html'));
 });
 
@@ -149,6 +127,7 @@ app.get('/health', async (req, res) => {
 
 // ─── POST /api/sse-ticket — Ticket SSE de un solo uso (30 segundos) ──────────
 const { crearTicket } = require('./utils/sse-tickets');
+const { authenticate } = require('./middleware/auth');
 app.post('/api/sse-ticket', authenticate, (req, res) => {
     const ticket = crearTicket(req.user.business_id);
     res.json({ ticket });
@@ -175,6 +154,7 @@ app.use('/api/audit',    require('./routes/audit'));
 app.use('/api/push',     require('./routes/push'));
 app.use('/api/exports',  require('./routes/exports'));
 app.use('/api/shopping-list', require('./routes/shoppingList'));
+app.use('/api/kds',      require('./routes/kds'));
 
 // Sentry: captura de errores (después de las rutas, antes de nuestro manejador —
 // `manejadorDeErrores` responde y no llama a next(), así que si Sentry fuera después

@@ -1,5 +1,19 @@
 const jwt = require('jsonwebtoken');
 const { User } = require('../models');
+const {
+    esTokenDeDispositivo, secretoDeToken, resolverDispositivo, tocarUltimoAcceso
+} = require('../utils/kdsDevices');
+
+/**
+ * ¿Es esta petición la cola de cocina? Es lo ÚNICO que una pantalla de cocina
+ * puede pedir, y por eso el cerrojo vive en una función con nombre: cuando el
+ * KDS necesite un endpoint nuevo hay que agregarlo AQUÍ, no quitar el cerrojo.
+ */
+function _esColaDeCocina(req) {
+    return req.method === 'GET'
+        && req.baseUrl === '/api/orders'
+        && (req.path === '/' || req.path === '');
+}
 
 // ── Caché corto de usuario (Bloque 3 del PLAN_ARREGLOS_V5) ───────────────────
 // `authenticate` corre en CADA request y hacía un `User.findByPk` cada vez, solo
@@ -68,27 +82,55 @@ const authenticate = async (req, res, next) => {
             return res.status(401).json({ error: 'Token no proporcionado' });
         }
 
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
-
-        // Tokens del KDS (purpose:'kds'): se firman con el MISMO JWT_SECRET y viajan
-        // en un QR, así que hay que acotarlos. Sin este cerrojo servían como token de
-        // sesión completo: al no traer `id`, la búsqueda de usuario fallaba, se caía al
-        // fallback `business_id = decoded.business_id` y quedaban habilitados contra
-        // cualquier ruta que filtre por negocio (clientes, inventario, ventas...).
-        // Solo pueden leer la cola de cocina, que es lo único que consume kds.html.
-        if (decoded.purpose === 'kds') {
-            const esColaDeCocina = req.method === 'GET'
-                && req.baseUrl === '/api/orders'
-                && (req.path === '/' || req.path === '');
-            if (!esColaDeCocina) {
-                return res.status(403).json({ error: 'Este token solo permite consultar la cola de cocina' });
+        // ── Pantalla de cocina: un DISPOSITIVO APROBADO, no un pase (BLOQUE 13) ──
+        // Antes esto era un JWT `purpose:'kds'` de 12 h que viajaba dentro del QR:
+        // el propio código ERA la credencial, así que fotografiarlo daba medio día
+        // de acceso sin forma de cortarlo. Ahora la credencial es el secreto que la
+        // tablet guarda en su `localStorage`, el estado se consulta en cada
+        // petición y revocar corta al instante (utils/kdsDevices.js).
+        //
+        // El cerrojo de alcance se mantiene igual de cerrado: solo GET /api/orders.
+        // Sin él, un secreto robado leería clientes, inventario y ventas — que es
+        // exactamente lo que pasaba con los tokens del KDS antes del §19.13.
+        if (esTokenDeDispositivo(token)) {
+            if (!_esColaDeCocina(req)) {
+                return res.status(403).json({ error: 'Este dispositivo solo permite consultar la cola de cocina' });
             }
+            let dispositivo;
+            try {
+                dispositivo = await resolverDispositivo(secretoDeToken(token));
+            } catch {
+                // La BD falló: sin poder comprobar el estado NO se deja pasar. Un
+                // dispositivo revocado entrando "porque no se pudo verificar"
+                // sería justo el agujero que este bloque viene a cerrar.
+                return res.status(503).json({ error: 'No se pudo verificar el dispositivo' });
+            }
+            if (!dispositivo.existe || dispositivo.estado === 'revocado') {
+                return res.status(401).json({ error: 'Dispositivo no autorizado' });
+            }
+            if (dispositivo.estado !== 'activo') {
+                return res.status(403).json({ error: 'Dispositivo pendiente de aprobación' });
+            }
+            tocarUltimoAcceso(dispositivo.id);
             req.user = {
-                business_id: decoded.business_id,
-                branch_id: decoded.branch_id ?? null,
-                esKds: true
+                business_id: dispositivo.business_id,
+                branch_id: dispositivo.branch_id ?? null,
+                esKds: true,
+                kds_device_id: dispositivo.id
             };
             return next();
+        }
+
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+        // Un JWT con `purpose:'kds'` es un pase de los que este bloque eliminó
+        // (los emitía el POST /api/kds/token que ya no existe). Se rechaza en vez
+        // de ignorarse: dejarlo caer al camino normal lo convertiría otra vez en
+        // un token de sesión completo, que es como nació el agujero del §19.13.
+        if (decoded.purpose === 'kds') {
+            return res.status(401).json({
+                error: 'Este código de cocina ya no es válido. Vuelve a emparejar la pantalla desde la app.'
+            });
         }
 
         req.user = decoded;

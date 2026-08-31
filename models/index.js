@@ -57,6 +57,10 @@ const ShoppingListItem = require('./ShoppingListItem');
 // Sesiones: un refresh token por dispositivo
 const RefreshToken = require('./RefreshToken');
 
+// Dispositivos de cocina aprobados (BLOQUE 13). Reemplazan al pase que caducaba:
+// se aprueban con PIN, quedan auditados y se revocan al instante.
+const KdsDevice = require('./KdsDevice');
+
 // Objeto con todos los modelos
 const models = {
     User,
@@ -88,6 +92,7 @@ const models = {
     ShoppingList,
     ShoppingListItem,
     RefreshToken,
+    KdsDevice,
 };
 
 // Definir relaciones
@@ -187,6 +192,10 @@ const setupRelations = () => {
     // Turno <-> CashMovement (movimientos de caja del turno)
     models.Turno.hasMany(models.CashMovement, { foreignKey: 'turno_id', as: 'movimientos' });
     models.CashMovement.belongsTo(models.Turno, { foreignKey: 'turno_id', as: 'turno' });
+
+    // KdsDevice: quién aprobó cada pantalla de cocina y qué sucursal ve.
+    models.KdsDevice.belongsTo(models.User, { foreignKey: 'aprobado_por', as: 'aprobador' });
+    models.KdsDevice.belongsTo(models.Branch, { foreignKey: 'branch_id', as: 'branch' });
 
     // User <-> RefreshToken (una fila por sesión/dispositivo)
     models.User.hasMany(models.RefreshToken, { foreignKey: 'user_id', as: 'refreshTokens', onDelete: 'CASCADE' });
@@ -441,6 +450,25 @@ const runMigrations = async () => {
             );
         } catch (err) {
             console.error('❌ Error asegurando índices de modificadores:', err.message);
+        }
+
+        // Dispositivos de cocina (BLOQUE 13). `sequelize.sync()` crea la tabla si
+        // no existe; aquí solo se aseguran los índices, que son los que hacen
+        // barato el camino caliente: CADA petición del KDS resuelve el
+        // dispositivo por su `secret_hash`.
+        //
+        // El índice de `secret_hash` es UNIQUE a propósito: dos dispositivos con
+        // el mismo secreto serían el mismo dispositivo, y aprobar uno aprobaría
+        // al otro sin que nadie lo viera.
+        try {
+            await sequelize.query(
+                'CREATE UNIQUE INDEX IF NOT EXISTS kds_devices_secret_uq ON kds_devices (secret_hash)'
+            );
+            await sequelize.query(
+                'CREATE INDEX IF NOT EXISTS kds_devices_biz_idx ON kds_devices (business_id)'
+            );
+        } catch (err) {
+            console.error('❌ Error asegurando índices de kds_devices:', err.message);
         }
 
         // ── CERRAR LA BASE A LOS ROLES PÚBLICOS (auditoría 2026-07-27) ──────
