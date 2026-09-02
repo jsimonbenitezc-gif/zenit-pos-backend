@@ -14,6 +14,7 @@ const {
 } = require('../utils/modificadores');
 const { convertirCantidad } = require('../utils/unidades');
 const { fraccionDeTanda } = require('../utils/preparaciones');
+const { evaluarHorario, avisarFueraDeHorario } = require('../utils/horarios');
 const { Op } = require('sequelize');
 const { notificarAudit } = require('./audit');
 const { enviarNotificacion, getPrefs } = require('../utils/push');
@@ -975,6 +976,7 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
         }
 
         // Auditar SIEMPRE que se aplique un descuento (quién, monto, pedido).
+        let marcaDescuento = null;
         if (discountAmt > 0) {
             // Identidad de quien aplicó el descuento: el empleado del PIN si lo hubo;
             // si no (descuento configurado sin PIN), el usuario autenticado.
@@ -984,6 +986,10 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
                 const actor = await User.findByPk(req.user.id, { attributes: ['id', 'name'], transaction: t });
                 actorNombre = actor?.name || 'Sin identificar';
             }
+            // BLOQUE 14 — se evalúa contra la HORA REAL de la venta, no la de llegada
+            // al servidor: un descuento aplicado a las 3 a.m. con la caja sin internet
+            // y subido a las 9 a.m. es sospechoso a las 3 a.m., no a las 9 (§26).
+            marcaDescuento = await evaluarHorario(biz, esVentaDiferida ? fechaVenta : new Date());
             await PrivilegedActionLog.create({
                 business_id: biz,
                 branch_id: branchIdFinal,
@@ -992,7 +998,8 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
                 action_type: 'apply_discount',
                 target_description: `Pedido #${order.id}`,
                 before_data: JSON.stringify({ subtotal: calculatedTotal }),
-                after_data: JSON.stringify({ discount_amount: discountAmt, total: finalTotal, discount_id: discount_id || null })
+                after_data: JSON.stringify({ discount_amount: discountAmt, total: finalTotal, discount_id: discount_id || null }),
+                fuera_horario: marcaDescuento.fuera
             }, { transaction: t });
         }
 
@@ -1018,6 +1025,8 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
         notificarOrders(biz);
         notificarInventario(biz);
         if (discountAmt > 0 || preciosDistintos.length > 0) notificarAudit(biz);
+        // Después del commit y sin await: un aviso jamás puede afectar a la venta.
+        avisarFueraDeHorario(biz, 'apply_discount', marcaDescuento);
 
         const fullOrder = await cargarPedidoCompleto(order.id);
 
@@ -1406,7 +1415,9 @@ router.put('/:id/status', authenticate, async (req, res) => {
 
         await order.update({ status, ...camposCobro }, { transaction: t });
 
+        let marcaCancelacion = null;
         if (authorizedEmployee && status === 'cancelado') {
+            marcaCancelacion = await evaluarHorario(biz);
             await PrivilegedActionLog.create({
                 business_id: biz,
                 branch_id: order.branch_id || null,
@@ -1415,7 +1426,8 @@ router.put('/:id/status', authenticate, async (req, res) => {
                 action_type: 'cancel_order',
                 target_description: `Pedido #${order.id}`,
                 before_data: JSON.stringify({ id: order.id, status: beforeStatus, total: order.total }),
-                after_data: JSON.stringify({ id: order.id, status: 'cancelado', total: order.total })
+                after_data: JSON.stringify({ id: order.id, status: 'cancelado', total: order.total }),
+                fuera_horario: marcaCancelacion.fuera
             }, { transaction: t });
         }
 
@@ -1425,6 +1437,7 @@ router.put('/:id/status', authenticate, async (req, res) => {
         if (status === 'cancelado') {
             notificarInventario(biz);
             if (authorizedEmployee) notificarAudit(biz);
+            avisarFueraDeHorario(biz, 'cancel_order', marcaCancelacion);
             // Push notification: pedido cancelado
             const empNombre = authorizedEmployee ? (employee_name || authorizedEmployee.name) : 'Sin identificar';
             enviarNotificacion(
@@ -1554,7 +1567,9 @@ router.delete('/:id', authenticate, async (req, res) => {
         await order.update({ status: 'cancelado' }, { transaction: t });
 
         // Registrar en auditoría si hubo autorización con PIN
+        let marcaDelete = null;
         if (authorizedEmployee) {
+            marcaDelete = await evaluarHorario(biz);
             await PrivilegedActionLog.create({
                 business_id: biz,
                 branch_id: order.branch_id || null,
@@ -1563,12 +1578,14 @@ router.delete('/:id', authenticate, async (req, res) => {
                 action_type: 'cancel_order',
                 target_description: `Pedido #${order.id}`,
                 before_data: JSON.stringify(beforeData),
-                after_data: JSON.stringify({ ...beforeData, status: 'cancelado' })
+                after_data: JSON.stringify({ ...beforeData, status: 'cancelado' }),
+                fuera_horario: marcaDelete.fuera
             }, { transaction: t });
             notificarAudit(biz);
         }
 
         await t.commit();
+        avisarFueraDeHorario(biz, 'cancel_order', marcaDelete);
 
         // Push notification: venta anulada
         const empNombreDelete = authorizedEmployee ? authorizedEmployee.name : 'Sin identificar';
@@ -1626,6 +1643,7 @@ router.post('/:id/devolucion', authenticate, async (req, res) => {
         const beforeStatus = order.status;
         await order.update({ status: 'devuelto' }, { transaction: t });
 
+        const marcaDevolucion = await evaluarHorario(biz);
         await PrivilegedActionLog.create({
             business_id: biz,
             branch_id: order.branch_id || null,
@@ -1634,12 +1652,14 @@ router.post('/:id/devolucion', authenticate, async (req, res) => {
             action_type: 'return_order',
             target_description: `Pedido #${order.id}`,
             before_data: JSON.stringify({ id: order.id, status: beforeStatus, total: order.total }),
-            after_data: JSON.stringify({ id: order.id, status: 'devuelto', total: order.total, motivo: motivo || null })
+            after_data: JSON.stringify({ id: order.id, status: 'devuelto', total: order.total, motivo: motivo || null }),
+            fuera_horario: marcaDevolucion.fuera
         }, { transaction: t });
 
         await t.commit();
         notificarOrders(biz);
         notificarAudit(biz);
+        avisarFueraDeHorario(biz, 'return_order', marcaDevolucion);
 
         // Push notification: pedido devuelto
         const empNombre = employee_name || authorizedEmployee.name;

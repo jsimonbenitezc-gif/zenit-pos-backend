@@ -11,6 +11,7 @@ const {
     zonaDelNegocio, inicioDiaLocal, inicioDiaLocalISO,
     sqlFechaLocal, sqlHoraLocal, sqlMesLocal
 } = require('../utils/tz');
+const { horarioDelNegocio, ventanaDelDia } = require('../utils/horarios');
 
 /**
  * Traduce los filtros `date_from`/`date_to` a un rango de instantes según la zona del
@@ -323,6 +324,11 @@ router.get('/dashboard', authenticate, async (req, res) => {
             ultimasVentas: ultimasVentasFormateadas,
             clientesVIPHoy: clientesVIPHoy.map(c => ({ id: c.id, name: c.name, phone: c.phone })),
             ventasPorHora,
+            // BLOQUE 14 — la ventana de HOY, para que la gráfica por hora no dibuje
+            // 24 barras cuando el negocio abre 9 horas: 15 columnas vacías esconden
+            // las que sí tienen datos. Es null si no hay horario configurado, y ahí
+            // los clientes siguen pintando el día completo, como siempre.
+            horarioHoy: ventanaDelDia(await horarioDelNegocio(biz), tz),
             productosStockBajoLista: productosStockBajoLista.map(p => ({
                 id: p.id,
                 name: p.name,

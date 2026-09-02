@@ -8,6 +8,7 @@ const { filtroVentaContable } = require('../utils/ordersFilter');
 const { resolverBranchId, filtroSucursalTurno, BranchError } = require('../utils/branch');
 const { configurarSSE } = require('../utils/sse');
 const { enviarNotificacion, getPrefs } = require('../utils/push');
+const { evaluarHorario, avisarFueraDeHorario } = require('../utils/horarios');
 const { autorizarAccionPrivilegiada } = require('../utils/verifyPin');
 const { User } = require('../models');
 const { TIPOS, totalesMovimientos, efectivoEsperado, montoValido } = require('../utils/cashMovements');
@@ -460,6 +461,7 @@ router.post('/:id/movimientos', authenticate, async (req, res) => {
         // Auditoría: solo tiene sentido cuando alguien se identificó con su PIN. Sin
         // PIN no hay a quién atribuirle el movimiento más allá del nombre escrito.
         if (autorizado) {
+            const marcaHorario = await evaluarHorario(biz);
             await PrivilegedActionLog.create({
                 business_id: biz,
                 branch_id:   turno.branch_id || null,
@@ -467,8 +469,10 @@ router.post('/:id/movimientos', authenticate, async (req, res) => {
                 employee_name: nombre || 'Sin identificar',
                 action_type: 'cash_movement',
                 target_description: `${ETIQUETA_TIPO[tipo]} de $${montoFinal.toFixed(2)} · Turno #${turno.id}`,
-                after_data: JSON.stringify({ id: mov.id, tipo, monto: montoFinal, motivo: mov.motivo })
+                after_data: JSON.stringify({ id: mov.id, tipo, monto: montoFinal, motivo: mov.motivo }),
+                fuera_horario: marcaHorario.fuera
             });
+            avisarFueraDeHorario(biz, 'cash_movement', marcaHorario);
         }
 
         _notificarTurno(biz);
@@ -538,6 +542,7 @@ router.post('/:id/movimientos/:movId/anular', authenticate, async (req, res) => 
         });
 
         if (autorizado) {
+            const marcaHorario = await evaluarHorario(biz);
             await PrivilegedActionLog.create({
                 business_id: biz,
                 branch_id:   mov.branch_id || null,
@@ -546,8 +551,10 @@ router.post('/:id/movimientos/:movId/anular', authenticate, async (req, res) => 
                 action_type: 'cash_movement_void',
                 target_description: `Anulación de ${(ETIQUETA_TIPO[mov.tipo] || mov.tipo).toLowerCase()} de $${(parseFloat(mov.monto) || 0).toFixed(2)} · Turno #${mov.turno_id}`,
                 before_data: JSON.stringify({ id: mov.id, tipo: mov.tipo, monto: parseFloat(mov.monto) || 0, anulado: false }),
-                after_data: JSON.stringify({ id: mov.id, anulado: true, motivo_anulacion: mov.motivo_anulacion })
+                after_data: JSON.stringify({ id: mov.id, anulado: true, motivo_anulacion: mov.motivo_anulacion }),
+                fuera_horario: marcaHorario.fuera
             });
+            avisarFueraDeHorario(biz, 'cash_movement_void', marcaHorario);
         }
 
         _notificarTurno(biz);

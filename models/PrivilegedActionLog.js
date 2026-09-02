@@ -42,6 +42,20 @@ const PrivilegedActionLog = sequelize.define('PrivilegedActionLog', {
     after_data: {
         type: DataTypes.TEXT,
         allowNull: true
+    },
+    // BLOQUE 14 — ¿la acción ocurrió FUERA del horario del negocio?
+    //
+    // Es una MARCA, no un permiso: la acción ya ocurrió y se registró igual. Sirve
+    // para que el dueño distinga de un vistazo la cancelación de las 2 de la tarde
+    // de la de las 3 de la mañana, y para filtrar el historial por ese criterio.
+    //
+    // Un negocio SIN horario configurado —el default— tiene todo en `false`, que es
+    // la verdad: sin horario definido no hay "fuera de horario". Las filas anteriores
+    // al bloque quedan en false por la misma razón.
+    fuera_horario: {
+        type: DataTypes.BOOLEAN,
+        allowNull: false,
+        defaultValue: false
     }
 }, {
     tableName: 'privileged_action_logs',

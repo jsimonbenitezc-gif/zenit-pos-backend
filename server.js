@@ -198,6 +198,7 @@ function iniciarCronJobs() {
     const { Op } = require('sequelize');
     const { filtroVentaContable } = require('./utils/ordersFilter');
     const { normalizarZona, horaLocal, diaSemanaLocal, inicioDiaLocal } = require('./utils/tz');
+    const { normalizarHorario, dentroDeHorario, ventanaDelDia } = require('./utils/horarios');
 
     // Resumen diario — corre cada hora en el minuto 0
     // Envía solo a los usuarios que tienen esa hora configurada en notif_resumen_diario_hora.
@@ -266,10 +267,31 @@ function iniciarCronJobs() {
                 const turnosLargos = await Turno.findAll({
                     where: { business_id: owner.id, estado: 'abierto', apertura: { [Op.lte]: limite } }
                 });
+                if (!turnosLargos.length) continue;
+
+                // BLOQUE 14 — el horario AFINA este aviso, no lo sustituye. Un turno
+                // largo dentro del horario es un olvido; el mismo turno con el
+                // negocio ya cerrado es una caja abierta sin nadie, que es otra
+                // cosa. Se distingue el mensaje, no la cadencia: el cron ya avisaba
+                // cada hora y meterle una regla nueva aquí duplicaría los avisos.
+                //
+                // Sin horario configurado se comporta EXACTAMENTE como antes.
+                const tzTurno = normalizarZona(prefs.tz);
+                const horarioNegocio = normalizarHorario(prefs.horario_operacion).horario;
+                const cerrado = horarioNegocio
+                    ? !dentroDeHorario(horarioNegocio, tzTurno, new Date())
+                    : false;
+
                 for (const t of turnosLargos) {
                     const horasAbiertas = ((Date.now() - new Date(t.apertura).getTime()) / 3600000).toFixed(1);
-                    enviarNotificacion(owner.id, null, '⏰ Turno abierto por mucho tiempo',
-                        `${t.cajero_nombre} lleva ${horasAbiertas}h con caja abierta`);
+                    if (cerrado) {
+                        const ventana = ventanaDelDia(horarioNegocio, tzTurno, new Date());
+                        enviarNotificacion(owner.id, null, '🌙 Caja abierta con el negocio cerrado',
+                            `${t.cajero_nombre} lleva ${horasAbiertas}h con caja abierta · horario de hoy ${ventana}`);
+                    } else {
+                        enviarNotificacion(owner.id, null, '⏰ Turno abierto por mucho tiempo',
+                            `${t.cajero_nombre} lleva ${horasAbiertas}h con caja abierta`);
+                    }
                 }
             }
         } catch (err) { logger.error(`[Cron turno largo] ${err.message}`); }

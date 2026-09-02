@@ -10,6 +10,7 @@ const { configurarSSE } = require('../utils/sse');
 const { zonaValida, invalidarZonaNegocio } = require('../utils/tz');
 const { normalizarTasa, normalizarNombre, invalidarImpuestoNegocio, NOMBRE_MAX } = require('../utils/impuestos');
 const { normalizarSugerencias, invalidarPropinasNegocio } = require('../utils/propinas');
+const { normalizarHorario, invalidarHorarioNegocio } = require('../utils/horarios');
 
 // Protección: máximo 10 intentos de verificación de PIN por minuto por IP
 const pinLimiter = rateLimit({
@@ -75,6 +76,9 @@ router.put('/', authenticate, async (req, res) => {
             'permisos_roles',
             'sucursal_id',
             'tz',
+            // Horario de operación (BLOQUE 14): SEÑAL de seguridad, nunca candado.
+            // Nace SIN definir, y sin él nada de este bloque se dispara.
+            'horario_operacion',
             // Preferencias de notificaciones push
             'notif_turno_abierto', 'notif_turno_cerrado',
             'notif_diferencia_caja', 'notif_diferencia_caja_umbral',
@@ -88,6 +92,7 @@ router.put('/', authenticate, async (req, res) => {
             'notif_resumen_diario', 'notif_resumen_diario_hora',
             'notif_resumen_semanal',
             'notif_cliente_nuevo', 'notif_puntos_canjeados',
+            'notif_fuera_horario',
         ];
         const incoming = {};
         for (const key of ALLOWED_KEYS) {
@@ -162,9 +167,29 @@ router.put('/', authenticate, async (req, res) => {
             return res.status(400).json({ error: 'Zona horaria inválida' });
         }
 
+        // El horario de operación (BLOQUE 14) es una SEÑAL DE SEGURIDAD: decide qué
+        // acciones se marcan como sospechosas y sobre cuáles se avisa al dueño. Que
+        // lo cambiara un empleado sería dejarle apagar la alarma que vigila justo sus
+        // propias acciones, así que es del DUEÑO — mismo criterio (y misma razón) que
+        // el impuesto y las propinas.
+        if ('horario_operacion' in incoming && req.user.id !== req.user.business_id) {
+            return res.status(403).json({ error: 'Solo el administrador puede cambiar el horario del negocio' });
+        }
+        // Un horario mal formado se RECHAZA en vez de caer a un default: en silencio
+        // dejaría al dueño creyendo que configuró un horario que no existe, esperando
+        // unas alertas que nunca van a llegar.
+        if ('horario_operacion' in incoming) {
+            const r = normalizarHorario(incoming.horario_operacion);
+            if (!r.ok) return res.status(400).json({ error: r.error });
+            incoming.horario_operacion = r.horario;
+        }
+
         const updated = { ...current, ...incoming };
         await user.update({ settings: JSON.stringify(updated) });
         if ('tz' in incoming) invalidarZonaNegocio(req.user.business_id);
+        // Sin esto, el horario recién guardado tardaría hasta 60 s en aplicarse y el
+        // dueño que acaba de corregirlo seguiría recibiendo alertas del anterior.
+        if ('horario_operacion' in incoming) invalidarHorarioNegocio(req.user.business_id);
         if (tocaImpuesto) invalidarImpuestoNegocio(req.user.business_id);
         if (tocaPropina) invalidarPropinasNegocio(req.user.business_id);
         // Notificar a todos los dispositivos conectados del mismo negocio

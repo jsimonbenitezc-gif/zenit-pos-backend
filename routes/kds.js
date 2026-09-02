@@ -25,6 +25,7 @@ const { KdsDevice, Branch, PrivilegedActionLog } = require('../models');
 const { authenticate, isOwner } = require('../middleware/auth');
 const { autorizarAccionPrivilegiada } = require('../utils/verifyPin');
 const { enviarNotificacion } = require('../utils/push');
+const { evaluarHorario, avisarFueraDeHorario } = require('../utils/horarios');
 const {
     hashSecreto, secretoValido, invalidarDispositivo,
     crearCodigoEmparejamiento, consumirCodigoEmparejamiento,
@@ -259,6 +260,25 @@ router.post('/devices/:id/approve', authenticate, async (req, res) => {
         });
         if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
 
+        // ── BLOQUE 14: la ÚNICA acción que el horario restringe ──────────────
+        //
+        // El horario es una señal, nunca un candado (utils/horarios.js): jamás se
+        // bloquea vender, cobrar, abrir turno ni ver la cocina. Aquí sí, y por una
+        // razón concreta: aprobar una pantalla da acceso PERMANENTE a la cola de
+        // pedidos, y a las 3 de la mañana no hay nadie mirando quién teclea un PIN
+        // que además es compartido entre todo un puesto.
+        //
+        // No es un bloqueo duro: es una ESCALERA. Dentro del horario aprueba
+        // cualquier puesto con PIN; fuera, solo el dueño. Así el que instala la
+        // tablet a las 8 a.m. antes de abrir tiene salida, y no se repite el error
+        // del pase de 12 h del §35 (proteger poco y estorbar mucho a la vez).
+        const marcaHorario = await evaluarHorario(biz);
+        if (marcaHorario.fuera && req.user.id !== req.user.business_id) {
+            return res.status(403).json({
+                error: `Fuera del horario del negocio (hoy ${marcaHorario.ventana}) solo el administrador puede autorizar una pantalla de cocina. Pídeselo, o cambia el horario en Ajustes.`
+            });
+        }
+
         if (branch_id !== undefined && branch_id !== null) {
             const sucursal = await Branch.findOne({ where: { id: branch_id, business_id: biz } });
             if (!sucursal) return res.status(400).json({ error: 'Sucursal no encontrada' });
@@ -281,6 +301,7 @@ router.post('/devices/:id/approve', authenticate, async (req, res) => {
             employee_id: auth.empleadoId,
             employee_name: dispositivo.aprobado_por_nombre,
             action_type: 'approve_kds_device',
+            fuera_horario: marcaHorario.fuera,
             target_description: `Aprobó la pantalla de cocina "${dispositivo.nombre}"`,
             after_data: JSON.stringify({
                 id: dispositivo.id,
@@ -290,6 +311,7 @@ router.post('/devices/:id/approve', authenticate, async (req, res) => {
                 ip_registro: dispositivo.ip_registro,
             }),
         });
+        avisarFueraDeHorario(biz, 'approve_kds_device', marcaHorario);
 
         res.json(_serializar(dispositivo));
     } catch (error) {
@@ -320,6 +342,10 @@ router.post('/devices/:id/revoke', authenticate, async (req, res) => {
         });
         if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
 
+        // Revocar NO se restringe por horario: quitarle el acceso a una pantalla
+        // perdida es justo lo que hay que poder hacer a las 3 a.m. Solo se marca.
+        const marcaRevocacion = await evaluarHorario(biz);
+
         const estadoAnterior = dispositivo.estado;
         dispositivo.estado = 'revocado';
         dispositivo.revocado_por = auth.empleadoId || req.user.id || null;
@@ -337,6 +363,7 @@ router.post('/devices/:id/revoke', authenticate, async (req, res) => {
             employee_id: auth.empleadoId,
             employee_name: dispositivo.revocado_por_nombre,
             action_type: 'revoke_kds_device',
+            fuera_horario: marcaRevocacion.fuera,
             target_description: estadoAnterior === 'pendiente'
                 ? `Rechazó la pantalla de cocina "${dispositivo.nombre || 'sin nombre'}"`
                 : `Revocó la pantalla de cocina "${dispositivo.nombre || 'sin nombre'}"`,
@@ -347,6 +374,7 @@ router.post('/devices/:id/revoke', authenticate, async (req, res) => {
                 motivo: motivo ? String(motivo).slice(0, 300) : null,
             }),
         });
+        avisarFueraDeHorario(biz, 'revoke_kds_device', marcaRevocacion);
 
         res.json(_serializar(dispositivo));
     } catch (error) {

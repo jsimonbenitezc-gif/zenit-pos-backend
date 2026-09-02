@@ -20,6 +20,7 @@ const { limpiarCacheImpuestos } = require('../utils/impuestos');
 const { limpiarCachePropinas } = require('../utils/propinas');
 const { limpiarCacheModificadores } = require('../utils/modificadores');
 const { limpiarCacheDispositivos, limpiarCodigosEmparejamiento } = require('../utils/kdsDevices');
+const { _limpiarAvisos } = require('../utils/horarios');
 
 // ── App Express ligera (sin Sentry, CORS, helmet, cron) ──
 // El límite del body y el manejador de errores son los MISMOS que en server.js,
@@ -40,6 +41,7 @@ app.use('/api/settings',   require('../routes/settings'));
 app.use('/api/turnos',     require('../routes/turnos'));
 app.use('/api/tables',     require('../routes/tables'));
 app.use('/api/kds',        require('../routes/kds'));
+app.use('/api/audit',      require('../routes/audit'));
 
 app.use(manejadorDeErrores);
 
@@ -77,6 +79,53 @@ async function initTestDb() {
     // (y el negocio) del test anterior.
     limpiarCacheDispositivos();
     limpiarCodigosEmparejamiento();
+    // El horario se cachea por negocio 60 s y los avisos fuera de horario se
+    // agrupan en memoria: sin limpiar, un test heredaría el horario del anterior
+    // (mismo id reutilizado) y contaría avisos que no provocó.
+    _limpiarAvisos();
+}
+
+// ── Helper: fijar el horario de un negocio ───────────────
+// Los tests necesitan un negocio "abierto" o "cerrado" AHORA MISMO sin depender
+// de a qué hora se corran. Se construye la semana entera alrededor del instante
+// actual del reloj del negocio.
+const { normalizarZona, diaSemanaLocal, invalidarZonaNegocio } = require('../utils/tz');
+const { invalidarHorarioNegocio } = require('../utils/horarios');
+
+/**
+ * Deja al negocio ABIERTO o CERRADO en este preciso instante, corra el test a la
+ * hora que corra. La semana se construye alrededor del reloj actual del negocio.
+ *
+ * ⚠️ El día "cerrado" es SOLO el de hoy; los otros seis quedan 09:00–18:00. Poner
+ * los siete cerrados no serviría: `normalizarHorario` lo interpreta —a propósito—
+ * como "sin horario definido", y el test acabaría probando el caso contrario al
+ * que dice probar.
+ *
+ * @param {'abierto'|'cerrado'} estado
+ */
+async function fijarHorario(user, estado, tz = 'America/Mexico_City') {
+    const zona = normalizarZona(tz);
+    const ahora = new Date();
+    const hoy = diaSemanaLocal(zona, ahora);
+
+    // "Abierto" se expresa como 24 h (`abre === cierra`) y no como una ventana
+    // alrededor de la hora actual: una ventana tiene bordes, y un test que corra
+    // a las 23:59 caería justo en uno. Un test intermitente es peor que ninguno.
+    const abierto = { cerrado: false, abre: '00:00', cierra: '00:00' };
+    const normal  = { cerrado: false, abre: '09:00', cierra: '18:00' };
+
+    const semana = Array.from({ length: 7 }, (_, i) =>
+        i === hoy ? (estado === 'abierto' ? abierto : { cerrado: true }) : normal
+    );
+
+    const settings = user.settings ? JSON.parse(user.settings) : {};
+    settings.tz = zona;
+    settings.horario_operacion = semana;
+    await user.update({ settings: JSON.stringify(settings) });
+    const biz = user.business_id || user.id;
+    invalidarHorarioNegocio(biz);
+    invalidarZonaNegocio(biz);
+    return { semana, hoy };
 }
 
 // ── Helper: crear usuario owner con JWT ──────────────────
@@ -100,4 +149,4 @@ async function createTestOwner(overrides = {}) {
     return { user, token };
 }
 
-module.exports = { app, sequelize, models, initTestDb, createTestOwner };
+module.exports = { app, sequelize, models, initTestDb, createTestOwner, fijarHorario };

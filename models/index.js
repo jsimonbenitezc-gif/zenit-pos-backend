@@ -471,6 +471,24 @@ const runMigrations = async () => {
             console.error('❌ Error asegurando índices de kds_devices:', err.message);
         }
 
+        // Marca de "fuera de horario" en la auditoría (BLOQUE 14). La tabla ya
+        // existe, así que `sequelize.sync()` no la toca: la columna se asegura
+        // aquí (§19.4). Las filas anteriores quedan en `false`, que es la verdad —
+        // el horario nace SIN definir y sin horario no hay "fuera de horario".
+        try {
+            await sequelize.query(
+                'ALTER TABLE privileged_action_logs ADD COLUMN IF NOT EXISTS fuera_horario BOOLEAN DEFAULT false'
+            );
+            // El dueño filtra el historial justo por esto ("enséñame lo de la
+            // madrugada"), y es una minoría de las filas: el índice parcial ocupa
+            // casi nada y evita el escaneo completo de la tabla.
+            await sequelize.query(
+                'CREATE INDEX IF NOT EXISTS pal_fuera_horario_idx ON privileged_action_logs (business_id, "createdAt") WHERE fuera_horario'
+            );
+        } catch (err) {
+            console.error('❌ Error asegurando fuera_horario en privileged_action_logs:', err.message);
+        }
+
         // ── CERRAR LA BASE A LOS ROLES PÚBLICOS (auditoría 2026-07-27) ──────
         // Zenit NO usa PostgREST: se conecta con Sequelize por el pooler como
         // `postgres`, que es DUEÑO de las tablas y tiene `rolbypassrls = true`.

@@ -19,6 +19,7 @@ const { requirePremium } = require('../middleware/checkPlan');
 const { configurarSSE } = require('../utils/sse');
 const { notificarAudit } = require('./audit');
 const { enviarNotificacion } = require('../utils/push');
+const { evaluarHorario, avisarFueraDeHorario } = require('../utils/horarios');
 const { paginate, paginatedResponse } = require('../utils/pagination');
 const { convertirCantidad } = require('../utils/unidades');
 const { fraccionDeTanda } = require('../utils/preparaciones');
@@ -683,6 +684,7 @@ router.post('/movements', authenticate, async (req, res) => {
 
         // Registrar en auditoría si fue un ajuste autorizado con PIN
         if (type === 'ajuste' && authorizedEmployee) {
+            const marcaHorario = await evaluarHorario(biz);
             await PrivilegedActionLog.create({
                 business_id: biz,
                 branch_id: branch_id || null,
@@ -691,9 +693,11 @@ router.post('/movements', authenticate, async (req, res) => {
                 action_type: 'inventory_adjustment',
                 target_description: `Insumo: ${ingredient.name}`,
                 before_data: JSON.stringify({ ingredient_id, name: ingredient.name, stock: stockAntes }),
-                after_data: JSON.stringify({ ingredient_id, name: ingredient.name, stock: parseFloat(quantity), reason: reason || null })
+                after_data: JSON.stringify({ ingredient_id, name: ingredient.name, stock: parseFloat(quantity), reason: reason || null }),
+                fuera_horario: marcaHorario.fuera
             });
             notificarAudit(biz);
+            avisarFueraDeHorario(biz, 'inventory_adjustment', marcaHorario);
         }
 
         _notificarInventario(biz); // avisar a clientes SSE conectados

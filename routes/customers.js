@@ -7,6 +7,7 @@ const { autorizarAccionPrivilegiada } = require('../utils/verifyPin');
 const { Op } = require('sequelize');
 const { notificarAudit } = require('./audit');
 const { enviarNotificacion } = require('../utils/push');
+const { evaluarHorario, avisarFueraDeHorario } = require('../utils/horarios');
 const rateLimit = require('express-rate-limit');
 const { paginate, paginatedResponse } = require('../utils/pagination');
 
@@ -254,6 +255,7 @@ router.put('/:id', authenticate, async (req, res) => {
 
         // Registrar en auditoría si hubo autorización
         if (authorizedEmployee) {
+            const marcaHorario = await evaluarHorario(biz);
             const afterData = {
                 name: customer.name,
                 phone: customer.phone,
@@ -268,9 +270,11 @@ router.put('/:id', authenticate, async (req, res) => {
                 action_type: 'edit_customer',
                 target_description: `Cliente #${customer.id} — ${customer.name}`,
                 before_data: JSON.stringify(beforeData),
-                after_data: JSON.stringify(afterData)
+                after_data: JSON.stringify(afterData),
+                fuera_horario: marcaHorario.fuera
             });
             notificarAudit(biz);
+            avisarFueraDeHorario(biz, 'edit_customer', marcaHorario);
         }
 
         res.json(customer);
