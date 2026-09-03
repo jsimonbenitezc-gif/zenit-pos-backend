@@ -1,58 +1,44 @@
 // ============================================================================
-// RECORRIDO 5 — HALLAZGO ABIERTO: la venta con el reloj adelantado se evapora
-//               entre los totales en vivo y el cierre del turno
+// RECORRIDO 5 — El equipo con el reloj adelantado no descuadra la caja
 //
-// ⚠️ ESTE RECORRIDO FALLA HOY A PROPÓSITO. No es una prueba rota: es la
-// reproducción mínima de un defecto REAL encontrado por este banco el
-// 2026-09-02, mientras se escribía el recorrido 4. Está marcado como
-// `hallazgoAbierto`, así que se ejecuta y se reporta en cada corrida pero NO
-// tumba el código de salida — el banco sigue sirviendo de red de seguridad
-// mientras el dueño del producto decide qué hacer. En cuanto se arregle el
-// backend, esto pasa a verde y hay que quitarle la marca.
+// Este recorrido nació ROJO. Lo escribió el banco de pruebas el 2026-09-02 para
+// reproducir un defecto real que él mismo encontró, y se arregló ese mismo día;
+// ahora vive como la prueba de que no vuelva.
 //
-// ── QUÉ PASA ────────────────────────────────────────────────────────────────
+// ── EL DEFECTO QUE VIGILA ───────────────────────────────────────────────────
 //
-// Las dos consultas que deciden cuánto vendió un turno NO usan el mismo filtro
+// Las dos consultas que deciden cuánto vendió un turno no usan el mismo filtro
 // de fechas (routes/turnos.js → `_ventasDelTurno`):
 //
 //     totales en vivo   (hasta = null)   →  createdAt >= apertura
 //     cierre del turno  (hasta = ahora)  →  createdAt BETWEEN apertura AND ahora
 //
-// Y por otro lado, `resolverFechaVenta` (utils/ventaOffline.js) ACEPTA a
-// propósito una venta fechada hasta 5 MINUTOS EN EL FUTURO, con esta razón
-// explícita: "5 min de tolerancia por relojes adelantados" (§26). Es una
-// decisión correcta — rechazar la venta de un equipo con el reloj mal la
-// dejaría atascada en la cola para siempre.
+// Y `resolverFechaVenta` acepta a propósito una venta fechada hasta 5 minutos en
+// el futuro, con esta razón explícita: "margen para relojes ligeramente
+// adelantados" (§26). Es una decisión correcta — rechazar la venta de un equipo
+// con el reloj mal la dejaría atascada en la cola para siempre.
 //
-// Juntando las dos: una venta subida desde un equipo con el reloj un par de
-// minutos adelantado se guarda con `createdAt` por delante del reloj del
-// servidor. Entonces:
+// Juntando las dos, una venta subida desde una tableta con el reloj un par de
+// minutos adelantado se guardaba con `createdAt` por delante del reloj del
+// servidor. Entonces el cajero la VEÍA en los totales mientras contaba el dinero
+// y DESAPARECÍA al cerrar: un sobrante fantasma de su mismo importe, con el
+// dinero correcto en el cajón. La misma familia de descuadre que cerraron el §28
+// (gastos), el §30 (propinas) y el §31 (pagos divididos).
 //
-//   • el cajero la VE en los totales del turno (pasa el `>= apertura`);
-//   • al cerrar, DESAPARECE (no pasa el `<= ahora`);
-//   • el dinero sí está en el cajón.
+// ── CÓMO SE ARREGLÓ ─────────────────────────────────────────────────────────
 //
-// Resultado: un SOBRANTE fantasma exactamente del tamaño de esa venta. Es la
-// misma familia de descuadre que el §28 (gastos), el §30 (propinas) y el §31
-// (pagos divididos) vinieron a cerrar: la diferencia del corte deja de
-// significar algo, que es lo único que la hace útil.
+// En `utils/ventaOffline.js`: dentro de la tolerancia, la venta se ACEPTA pero se
+// le fija la hora del servidor (`motivo: 'futura_ajustada'`). Ninguna venta se
+// guarda ya con fecha en el futuro, así que el hueco entre las dos consultas
+// deja de existir.
 //
-// ── POR QUÉ NO LO VIO NADIE ─────────────────────────────────────────────────
-//
-// Las pruebas unitarias comprueban los totales O el cierre, nunca los dos sobre
-// el mismo turno y con una venta en ese hueco de tiempo. El hueco solo aparece
-// recorriendo el día entero, que es justo lo que hace este banco.
-//
-// ── CÓMO SE ARREGLARÍA (a decidir por el dueño del producto) ────────────────
-//
-// El `hasta` del cierre existe para que no se cuelen ventas posteriores al
-// corte, y eso está bien. Lo que no está bien es que su tope sea más estrecho
-// que la tolerancia con la que se aceptan las ventas. La corrección natural es
-// que el cierre admita la misma holgura que la entrada — es decir, acotar por
-// `ahora + TOLERANCIA_FUTURO_MS` en vez de por `ahora` — o, en su defecto, que
-// las dos consultas usen el MISMO filtro, que es lo que el comentario de
-// `_ventasDelTurno` ya promete: "si cada uno lo calculara aparte, el cajero
-// vería un número al contar el dinero y otro al confirmar el cierre".
+// ⚠️ NO se ensanchó el filtro del cierre a `ahora + tolerancia`, que era lo
+// primero que venía a la mente: eso habría metido la misma venta TAMBIÉN en el
+// turno siguiente —cuya apertura sería anterior a la fecha de la venta—,
+// cambiando un sobrante fantasma por un DOBLE CONTEO. Si alguna vez alguien
+// "arregla" esto moviendo el filtro del turno, este recorrido seguirá en verde
+// y el error volverá por la otra puerta: el guard de verdad es que la fecha
+// nunca sea futura.
 // ============================================================================
 
 const { LibroDeCaja } = require('../lib/libro');
@@ -64,10 +50,8 @@ const FONDO_INICIAL = 400.00;
 const ADELANTO_MS = 90 * 1000;
 
 module.exports = {
-    nombre: 'Reloj adelantado: la venta se ve en los totales y no en el cierre',
+    nombre: 'Reloj adelantado: la venta cuenta igual en los totales y en el cierre',
     etiqueta: 'reloj',
-    hallazgoAbierto: 'El cierre de turno acota por `ahora` mientras la venta se acepta con hasta ' +
-                     '5 min de adelanto: esa venta aparece en los totales y desaparece del corte.',
 
     async ejecutar({ af, sembrar }) {
         const t = await sembrar('reloj', { productos: ['pastor'] });
@@ -82,8 +66,7 @@ module.exports = {
         }, [200, 201]);
 
         // La tableta de la caja tiene el reloj 90 s adelantado y sube una venta
-        // que hizo sin internet. El backend la acepta —es lo correcto— y la
-        // guarda con la hora que declara.
+        // que hizo sin internet.
         const relojAdelantado = new Date(Date.now() + ADELANTO_MS);
 
         const venta = await api.exigir('POST', '/api/orders', {
@@ -94,28 +77,37 @@ module.exports = {
             sold_at: relojAdelantado.toISOString(),
         }, [200, 201]);
 
+        // 1. La venta NO se rechaza: para eso existe la tolerancia.
         af.dinero('la venta del equipo con el reloj adelantado se registra', venta.total, 110.00);
+
+        // 2. Pero no se guarda en el futuro: se le fija la hora del servidor.
+        const guardada = new Date(venta.createdAt).getTime();
         af.cierto(
-            'y conserva su hora, por delante del reloj del servidor',
-            new Date(venta.createdAt).getTime() > Date.now(),
-            'createdAt no quedó en el futuro (' + venta.createdAt + '); el escenario no se reprodujo ' +
-            'y las dos comprobaciones siguientes no prueban nada'
+            'y NO queda fechada en el futuro: se ajusta al reloj del servidor',
+            guardada <= Date.now() + 1000,
+            'createdAt quedó en ' + venta.createdAt + ', por delante del servidor. ' +
+            'Ese es exactamente el hueco por el que la venta desaparecía del cierre.'
+        );
+        af.cierto(
+            'y el ajuste es de segundos, no la tira a otro momento del día',
+            Math.abs(guardada - Date.now()) < 5 * 60 * 1000,
+            'la hora ajustada quedó demasiado lejos de ahora: ' + venta.createdAt
         );
 
         libro.venta({ pagos: [{ metodo: 'efectivo', monto: 110.00 }], concepto: 'venta con reloj adelantado' });
 
-        // Lo que el cajero ve en pantalla mientras cuenta el dinero.
+        // 3. Lo que el cajero ve en pantalla mientras cuenta el dinero.
         const totales = await api.exigir('GET', '/api/turnos/' + turno.id + '/totales', undefined, 200);
-        af.dinero('el cajero la VE en los totales del turno', totales.total_ventas, libro.totalVentas);
+        af.dinero('el cajero la ve en los totales del turno', totales.total_ventas, libro.totalVentas);
         af.dinero('y el efectivo esperado la incluye', totales.efectivo_esperado, libro.efectivoEnCajon);
 
-        // El dinero está en el cajón: el cajero cuenta lo que los totales le dijeron.
+        // 4. Y sigue ahí al cerrar. Aquí es donde antes se evaporaba.
         const cerrado = await api.exigir('PUT', '/api/turnos/' + turno.id + '/cerrar', {
             efectivo_contado: libro.efectivoEnCajon,
-            notas: 'Cierre con una venta fechada por delante del reloj del servidor',
+            notas: 'Cierre con una venta de un equipo con el reloj adelantado',
         }, 200);
 
-        af.dinero('la venta sigue contando en el turno CERRADO', cerrado.total_ventas, libro.totalVentas);
-        af.dinero('DIFERENCIA DEL CORTE (aquí aparece el sobrante fantasma)', cerrado.diferencia, 0);
+        af.dinero('la venta SIGUE contando en el turno cerrado', cerrado.total_ventas, libro.totalVentas);
+        af.dinero('DIFERENCIA DEL CORTE (aquí aparecía el sobrante fantasma)', cerrado.diferencia, 0);
     },
 };

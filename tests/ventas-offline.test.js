@@ -59,9 +59,31 @@ describe('Bloque 5 — Fidelidad de ventas offline', () => {
             expect(resolverFechaVenta(enUnaHora.toISOString())).toEqual({ fecha: null, motivo: 'futura' });
         });
 
-        test('tolera un desfase pequeño de reloj (1 minuto adelante)', () => {
-            const enUnMinuto = new Date(Date.now() + 60 * 1000);
-            expect(resolverFechaVenta(enUnMinuto.toISOString()).motivo).toBe('ok');
+        test('tolera un desfase pequeño de reloj (1 minuto adelante) SIN guardar la venta en el futuro', () => {
+            const ahora = new Date();
+            const enUnMinuto = new Date(ahora.getTime() + 60 * 1000);
+            const { fecha, motivo } = resolverFechaVenta(enUnMinuto.toISOString(), ahora);
+
+            // La venta se ACEPTA: para eso existe la tolerancia (rechazarla la
+            // dejaría atascada en la cola del POS para siempre).
+            expect(fecha).not.toBeNull();
+            // Pero NO se le cree la hora: se le fija la del servidor.
+            expect(motivo).toBe('futura_ajustada');
+            expect(fecha.getTime()).toBe(ahora.getTime());
+        });
+
+        test('ninguna venta se guarda con fecha en el futuro (el hueco del corte de caja)', () => {
+            // REGRESIÓN. Una venta fechada por delante del reloj del servidor
+            // aparecía en los totales del turno (`createdAt >= apertura`) y
+            // desaparecía del cierre (`BETWEEN apertura AND ahora`), dejando un
+            // sobrante fantasma con el dinero correcto en el cajón. Lo encontró
+            // el banco de pruebas del BLOQUE 15. Ver CLAUDE.md §38.
+            const ahora = new Date();
+            for (const segundos of [1, 30, 90, 299]) {
+                const adelantada = new Date(ahora.getTime() + segundos * 1000);
+                const { fecha } = resolverFechaVenta(adelantada.toISOString(), ahora);
+                expect(fecha.getTime()).toBeLessThanOrEqual(ahora.getTime());
+            }
         });
 
         test('descarta una hora absurdamente vieja y un texto inválido', () => {

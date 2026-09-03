@@ -24,7 +24,7 @@ const PRECIO_MAXIMO = 1000000;
  * Valida la hora que declara el cliente para una venta diferida.
  * @param {string|Date} soldAt   Timestamp ISO enviado por el cliente.
  * @param {Date} [ahora]         Inyectable para tests.
- * @returns {{ fecha: Date|null, motivo: 'ok'|'ausente'|'invalida'|'futura'|'antigua' }}
+ * @returns {{ fecha: Date|null, motivo: 'ok'|'ausente'|'invalida'|'futura'|'futura_ajustada'|'antigua' }}
  *          `fecha` null = usar la hora del servidor.
  */
 function resolverFechaVenta(soldAt, ahora = new Date()) {
@@ -35,6 +35,30 @@ function resolverFechaVenta(soldAt, ahora = new Date()) {
     if (Number.isNaN(fecha.getTime())) return { fecha: null, motivo: 'invalida' };
     if (fecha.getTime() > ahora.getTime() + TOLERANCIA_FUTURO_MS) {
         return { fecha: null, motivo: 'futura' };
+    }
+    // ⚠️ NINGUNA VENTA SE GUARDA CON FECHA EN EL FUTURO. La tolerancia de arriba
+    // existe para no RECHAZAR la venta de un equipo con el reloj adelantado, no
+    // para creerle la hora: dentro de esa ventana se acepta la venta y se le fija
+    // la hora del servidor.
+    //
+    // Sin esto, una venta fechada por delante del reloj se colaba en un hueco y
+    // el corte de caja dejaba de cuadrar. Los totales en vivo del turno filtran
+    // con `createdAt >= apertura` y el cierre con `BETWEEN apertura AND ahora`
+    // (routes/turnos.js → `_ventasDelTurno`), así que esa venta APARECÍA en la
+    // pantalla que el cajero mira al contar el dinero y DESAPARECÍA del cierre:
+    // un sobrante fantasma de su mismo importe, con el dinero correcto en el
+    // cajón. Lo encontró el banco de pruebas del BLOQUE 15 (CLAUDE.md §38).
+    //
+    // Se corrige aquí y no ensanchando el filtro del cierre a `ahora + tolerancia`,
+    // que era lo primero que venía a la mente: eso habría metido la venta TAMBIÉN
+    // en el turno siguiente (su `apertura` sería anterior a la fecha de la venta),
+    // cambiando un sobrante fantasma por un DOBLE CONTEO, que es peor.
+    //
+    // Se pierden como mucho 5 minutos de precisión en la hora, y solo en un equipo
+    // con el reloj mal. La venta, su precio y su trato de venta diferida quedan
+    // intactos: `fecha` sigue siendo válida, así que `esVentaDiferida` no cambia.
+    if (fecha.getTime() > ahora.getTime()) {
+        return { fecha: new Date(ahora.getTime()), motivo: 'futura_ajustada' };
     }
     if (fecha.getTime() < ahora.getTime() - MAXIMO_ATRASO_MS) {
         return { fecha: null, motivo: 'antigua' };

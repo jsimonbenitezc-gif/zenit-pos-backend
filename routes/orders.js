@@ -566,6 +566,12 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
             // Nunca se rechaza la venta por esto: se registra con la hora del
             // servidor y queda el aviso para diagnosticar el reloj del equipo.
             logger.warn(`sold_at descartado (${motivoFecha}) en venta de negocio ${biz}: ${sold_at}`);
+        } else if (motivoFecha === 'futura_ajustada') {
+            // La venta se registra igual y sigue siendo diferida; solo se le fijó
+            // la hora del servidor porque venía del futuro. El aviso es lo único
+            // que delata un equipo con el reloj mal configurado, que es un
+            // problema real del local aunque ya no descuadre la caja.
+            logger.warn(`sold_at por delante del reloj del servidor en negocio ${biz}: ${sold_at} (ajustado a ahora)`);
         }
 
         // Idempotencia: si ya existe un pedido con este client_uuid en el negocio,
