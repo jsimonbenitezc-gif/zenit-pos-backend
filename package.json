@@ -9,7 +9,10 @@
     "test": "jest --forceExit --detectOpenHandles",
     "migrate": "npx sequelize-cli db:migrate",
     "migrate:undo": "npx sequelize-cli db:migrate:undo",
-    "migrate:status": "npx sequelize-cli db:migrate:status"
+    "migrate:status": "npx sequelize-cli db:migrate:status",
+    "probar:postgres": "node pruebas-postgres/correr.js",
+    "test:pg": "node pruebas-postgres/correr-jest.js",
+    "verificar": "npm test && npm run test:pg && npm run probar:postgres"
   },
   "dependencies": {
     "@sentry/node": "^10.45.0",
@@ -27,6 +30,7 @@
     "winston": "^3.19.0"
   },
   "devDependencies": {
+    "embedded-postgres": "^17.10.0-beta.17",
     "jest": "^30.3.0",
     "nodemon": "^3.0.2",
     "sequelize-cli": "^6.6.5",

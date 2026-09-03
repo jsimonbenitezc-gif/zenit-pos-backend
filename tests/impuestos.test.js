@@ -145,7 +145,11 @@ describe('POST /api/orders con impuesto', () => {
     test('el DESCUENTO baja la base gravable (se descuenta antes del impuesto)', async () => {
         await activar({ tax_rate: 16, tax_included: false });
         const descuento = await models.Discount.create({
-            name: 'Diez menos', type: 'fijo', value: 10, business_id: owner.id,
+            // 'fixed', no 'fijo': `Discount.type` es un ENUM('percentage','fixed').
+            // SQLite no valida los ENUM y se tragaba 'fijo' sin decir nada, así que
+            // esta prueba llevaba tiempo pasando con un dato IMPOSIBLE en producción.
+            // Lo destapó `npm run test:pg` (CLAUDE.md §39), donde Postgres sí lo rechaza.
+            name: 'Diez menos', type: 'fixed', value: 10, business_id: owner.id,
         });
 
         const res = await venta({ discount_amount: 10, discount_id: descuento.id });

@@ -1,0 +1,49 @@
+# ============================================================================
+# PostgreSQL DESECHABLE para el banco de pruebas (BLOQUE 15)
+#
+#     npm run probar:postgres
+#
+# El runner (pruebas-postgres/correr.js) levanta y TIRA este contenedor solo; no
+# hace falta ejecutar nada de aquí a mano. Si Docker no está instalado, el runner
+# cae a un binario embebido de PostgreSQL y funciona igual.
+#
+# ⚠️ ESTA BASE SE BORRA Y SE RECREA EN CADA CORRIDA. No pongas nada aquí que te
+# importe, y no apuntes NUNCA el banco a una base alojada: siembra negocios y
+# Zenit no tiene forma de borrarlos (ni debe tenerla — un borrado en cascada con
+# el business_id equivocado se lleva un negocio real). La salida limpia es tirar
+# el contenedor. Ver pruebas-postgres/lib/guardas.js.
+#
+# Para levantarlo a mano (depurar con psql, mirar una tabla tras un fallo):
+#     docker compose -f docker-compose.pruebas.yml up -d
+#     psql postgresql://zenit_pruebas:zenit_pruebas@127.0.0.1:55432/zenit_pruebas
+#     docker compose -f docker-compose.pruebas.yml down -v
+# ============================================================================
+
+services:
+  postgres-pruebas:
+    # Se fija la MAYOR (17) en vez de "latest": el banco existe para atrapar
+    # diferencias de dialecto, y un motor que cambia solo debajo convertiría un
+    # fallo del banco en una incógnita. Súbela a propósito, no por inercia.
+    image: postgres:17-alpine
+    container_name: zenit-postgres-pruebas
+    environment:
+      POSTGRES_USER: zenit_pruebas
+      POSTGRES_PASSWORD: zenit_pruebas
+      POSTGRES_DB: zenit_pruebas
+      # UTF8 explícito. Sin esto, en un anfitrión con configuración regional
+      # de Windows la base nace en WIN1252 y `sequelize.sync()` MUERE al crear
+      # la tabla `combos`: su columna `emoji` tiene un 🎁 como valor por defecto.
+      # Producción es UTF8 y Zenit guarda emojis por todas partes.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    ports:
+      # 55432 y no 5432: para no chocar con un PostgreSQL que ya tengas puesto.
+      - "${PRUEBAS_PG_PUERTO:-55432}:5432"
+    # tmpfs: la base vive en RAM y desaparece con el contenedor. Es más rápido y,
+    # sobre todo, hace imposible que queden datos de pruebas olvidados en disco.
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zenit_pruebas -d zenit_pruebas"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
