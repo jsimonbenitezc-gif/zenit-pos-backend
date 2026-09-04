@@ -3,6 +3,12 @@ const { Sequelize } = require('sequelize');
 
 let sequelize;
 
+/** ¿La base vive en esta misma máquina? (dev, o el Postgres desechable del §38) */
+function esHostLocal(host) {
+    const h = String(host || '').toLowerCase().trim();
+    return h === '' || h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === 'host.docker.internal';
+}
+
 // INTERRUPTOR: las mismas pruebas de Jest, sobre PostgreSQL de verdad.
 //
 // `npm test` sigue usando SQLite en memoria (rápido, sin instalar nada) y ese es
@@ -58,6 +64,47 @@ if (usarPostgresEnTests) {
             port: process.env.DB_PORT,
             dialect: 'postgres',
             logging: process.env.NODE_ENV === 'development' ? console.log : false,
+            // ─── TLS hacia Supabase ────────────────────────────────────────
+            // 🔴 MEDIDO EL 2026-09-04, NO SUPUESTO: sin esto la conexión viajaba
+            // en TEXTO PLANO (`socket.getProtocol()` devolvía null). El pooler
+            // acepta las dos, así que nada fallaba y nada lo decía — la
+            // contraseña de la base y todos los datos del negocio iban sin
+            // cifrar entre Render y AWS. Con esto: TLSv1.3.
+            //
+            // ⚠️ `pg_stat_ssl` NO sirve para comprobarlo: a través del pooler
+            // reporta el tramo Supavisor → Postgres, no el nuestro. Hay que
+            // mirar el socket del cliente.
+            //
+            // `rejectUnauthorized` queda en false MIENTRAS no haya certificado:
+            // Supabase firma con su propia CA ("Supabase Intermediate 2021 CA"),
+            // que no está en el almacén de Node, así que verificar falla con
+            // "self-signed certificate in certificate chain". Eso CIFRA pero no
+            // AUTENTICA al servidor: protege de que alguien escuche por el
+            // camino, no de que alguien se haga pasar por la base.
+            //
+            // Para cerrarlo del todo: bajar el certificado del panel de Supabase
+            // (Settings → Database → SSL Configuration) y ponerlo en la variable
+            // `DB_SSL_CA` de Render. Con ella, la verificación se activa sola y
+            // no hay que tocar este archivo.
+            //
+            // Escape: `DB_SSL=false` desactiva el TLS sin desplegar código, por
+            // si el pooler cambiara y el arranque dejara de conectar.
+            //
+            // ⚠️ Se salta en un host LOCAL, y no es un detalle: un PostgreSQL de
+            // desarrollo (o el desechable del banco de pruebas, §38) no tiene TLS
+            // y exigírselo deja al backend sin conectar. La primera versión de
+            // esto no lo contemplaba y el banco lo cazó al instante — "el backend
+            // no llegó a responder /health". Cifrar el tramo entre dos procesos
+            // de la misma máquina no protege de nada.
+            ...(process.env.DB_SSL === 'false' || esHostLocal(process.env.DB_HOST) ? {} : {
+                dialectOptions: {
+                    ssl: {
+                        require: true,
+                        rejectUnauthorized: !!process.env.DB_SSL_CA,
+                        ...(process.env.DB_SSL_CA ? { ca: process.env.DB_SSL_CA } : {}),
+                    },
+                },
+            }),
             pool: {
                 // Supabase pooler en session mode limita a 15 clientes.
                 // Mantener max por debajo de ese tope evita EMAXCONNSESSION

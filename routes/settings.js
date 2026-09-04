@@ -1,11 +1,11 @@
 const express = require('express');
 const router = express.Router();
 const logger = require('../utils/logger');
-const crypto = require('crypto');
 const bcrypt = require('bcrypt');
 const rateLimit = require('express-rate-limit');
 const { User } = require('../models');
 const { authenticate } = require('../middleware/auth');
+const { verificarPinDePerfil } = require('../utils/verifyPin');
 const { configurarSSE } = require('../utils/sse');
 const { zonaValida, invalidarZonaNegocio } = require('../utils/tz');
 const { normalizarTasa, normalizarNombre, invalidarImpuestoNegocio, NOMBRE_MAX } = require('../utils/impuestos');
@@ -201,79 +201,51 @@ router.put('/', authenticate, async (req, res) => {
     }
 });
 
-// POST /api/settings/verify-pin — Verificar PIN de perfil (permisos_roles) con bcrypt
-// Soporta SHA256 legacy (desktop) y migra automáticamente a bcrypt al verificar.
+// POST /api/settings/verify-pin — Verificar el PIN de un PUESTO.
+// Lo llaman los clientes ANTES de actuar (elegir perfil, abrir el modal de
+// descuento…), para no armar un flujo entero y descubrir al final que el PIN
+// estaba mal.
+//
+// ⚠️ Esta ruta tenía su PROPIA copia de la verificación (deuda técnica §12.6):
+// leía `permisos_roles`, resolvía la sucursal y comparaba bcrypt/SHA-256 por su
+// cuenta. Dos implementaciones de la misma regla acaban divergiendo, y ésta ya
+// lo hacía: **ignoraba la sucursal del empleado**, así que un negocio con PINes
+// distintos por sucursal validaba contra el equivocado. Ahora usa el mismo
+// `verificarPinDePerfil()` que las rutas que de verdad autorizan (§19.19).
 router.post('/verify-pin', pinLimiter, authenticate, async (req, res) => {
     try {
         const { role, pin } = req.body;
         if (!role || !pin) {
             return res.status(400).json({ error: 'role y pin son requeridos' });
         }
-        if (!/^\d{4,8}$/.test(pin)) {
+        if (!/^d{4,8}$/.test(pin)) {
             return res.status(400).json({ error: 'El PIN debe ser entre 4 y 8 dígitos numéricos' });
         }
 
-        // Leer permisos_roles del owner del negocio
-        const ownerId = req.user.business_id;
-        const owner = await User.findByPk(ownerId, { attributes: ['id', 'settings'] });
-        if (!owner) return res.status(404).json({ error: 'Negocio no encontrado' });
+        const r = await verificarPinDePerfil({
+            businessId: req.user.business_id,
+            role,
+            pin,
+            branchId: req.user.branch_id || null,
+        });
 
-        const settings = owner.settings ? JSON.parse(owner.settings) : {};
-        const permisosRoles = settings.permisos_roles || {};
-
-        // Resolver permisos efectivos (puede haber por sucursal)
-        let permisos = permisosRoles;
-        // Si es un objeto con claves __b_ (sucursales), buscar en todas
-        const branchKeys = Object.keys(permisosRoles).filter(k => k.startsWith('__b_'));
-        if (branchKeys.length > 0) {
-            // Primero intentar sin sucursal (nivel global)
-            const globalPermisos = Object.fromEntries(
-                Object.entries(permisosRoles).filter(([k]) => !k.startsWith('__b_'))
-            );
-            // Si el role existe a nivel global, usar esos
-            if (globalPermisos[role]) {
-                permisos = globalPermisos;
-            } else {
-                // Buscar en cada sucursal
-                for (const bk of branchKeys) {
-                    if (permisosRoles[bk]?.[role]) {
-                        permisos = permisosRoles[bk];
-                        break;
-                    }
-                }
-            }
+        // Un puesto SIN PIN configurado responde `valid: false`, igual que antes.
+        // Aquí NO aplica la regla de "sin PIN solo confirma" (§19.19): eso lo
+        // decide la ruta que ejecuta la acción, no esta consulta previa.
+        if (r.settingsMigrados && r.ownerId) {
+            // Se validó por SHA-256 legacy: se persiste el bcrypt recién generado
+            // y se avisa por SSE, porque `permisos_roles` acaba de cambiar.
+            await User.update({ settings: JSON.stringify(r.settingsMigrados) }, { where: { id: r.ownerId } });
+            _notificarSettings(r.ownerId);
         }
 
-        const rolData = permisos[role];
-        if (!rolData || !rolData.pin_set) {
-            return res.json({ valid: false });
-        }
-
-        let valid = false;
-
-        // 1) Intentar bcrypt primero (ya migrado)
-        if (rolData.pin_bcrypt) {
-            valid = await bcrypt.compare(pin, rolData.pin_bcrypt);
-        }
-        // 2) Fallback a SHA256 legacy (desktop genera estos)
-        else if (rolData.pin) {
-            const sha256Hash = crypto.createHash('sha256').update(pin).digest('hex');
-            valid = (sha256Hash === rolData.pin);
-
-            // Migración automática: si el SHA256 coincide, guardar bcrypt
-            if (valid) {
-                rolData.pin_bcrypt = await bcrypt.hash(pin, 10);
-                await owner.update({ settings: JSON.stringify(settings) });
-                _notificarSettings(ownerId);
-            }
-        }
-
-        res.json({ valid });
+        res.json({ valid: r.valid === true });
     } catch (error) {
         logger.error('Error en verify-pin (settings):', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
+
 
 // POST /api/settings/hash-pin — Generar hash bcrypt de un PIN (para crear/actualizar PINs)
 router.post('/hash-pin', pinLimiter, authenticate, async (req, res) => {
