@@ -1,8 +1,9 @@
 const express = require('express');
 const router = express.Router();
 const logger = require('../utils/logger');
-const { Ingredient, Branch, BranchStock, Order, sequelize } = require('../models');
+const { Ingredient, Branch, Order, sequelize } = require('../models');
 const { authenticate } = require('../middleware/auth');
+const { mapaPorSucursal } = require('../utils/branchStock');
 const { Op } = require('sequelize');
 
 // GET /api/alerts
@@ -19,7 +20,11 @@ router.get('/', authenticate, async (req, res) => {
         const [ingredients, branches] = await Promise.all([
             Ingredient.findAll({
                 where: { business_id: biz, active: true },
-                attributes: ['name', 'stock', 'min_stock', 'branch_stocks']
+                // ⚠️ `id` es OBLIGATORIO: sin él, Sequelize NO lo agrega solo y
+                // `ing.id` queda en undefined. Así estuvo desde que se escribió,
+                // así que el mapa de stock por sucursal nunca acertaba y estas
+                // alertas salían siempre del JSON legado (deuda §12.1).
+                attributes: ['id', 'name', 'stock', 'min_stock']
             }),
             Branch.findAll({
                 where: { business_id: biz, active: true },
@@ -30,22 +35,15 @@ router.get('/', authenticate, async (req, res) => {
         const branchMap = {};
         branches.forEach(b => { branchMap[String(b.id)] = b.name; });
 
-        // Precargar stocks de tabla BranchStock
+        // Stock por sucursal de todos los insumos, en una sola consulta (§12.1).
         const ingIds = ingredients.map(i => i.id);
-        const tableStocks = ingIds.length > 0
-            ? await BranchStock.findAll({ where: { ingredient_id: { [Op.in]: ingIds } } })
-            : [];
-        const tableMap = {}; // ingredientId -> { branchId: qty }
-        for (const r of tableStocks) {
-            if (!tableMap[r.ingredient_id]) tableMap[r.ingredient_id] = {};
-            tableMap[r.ingredient_id][String(r.branch_id)] = parseFloat(r.quantity);
-        }
+        const porSucursal = await mapaPorSucursal(ingIds);
 
         ingredients.forEach(ing => {
             if (!ing.min_stock || ing.min_stock <= 0) return;
-            // Tabla primero, fallback JSON
-            const tableData = tableMap[ing.id];
-            const bs = tableData || (Object.keys(ing.branch_stocks || {}).length > 0 ? ing.branch_stocks : null);
+            // Con reparto por sucursal se avisa sucursal por sucursal; sin él, el
+            // insumo vale su stock global (negocio de un solo local).
+            const bs = porSucursal[ing.id] || null;
             if (bs && Object.keys(bs).length > 0) {
                 Object.entries(bs).forEach(([branchId, stock]) => {
                     const branchName = branchMap[branchId] || `Sucursal ${branchId}`;

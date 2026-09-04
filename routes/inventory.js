@@ -24,24 +24,13 @@ const { paginate, paginatedResponse } = require('../utils/pagination');
 const { convertirCantidad } = require('../utils/unidades');
 const { fraccionDeTanda } = require('../utils/preparaciones');
 
-// ── Helper: lectura dual BranchStock (tabla primero, fallback JSON) ──────────
-async function getBranchStockFromTable(ingredientId, branchId) {
-    if (!branchId) return null;
-    const record = await BranchStock.findOne({
-        where: { ingredient_id: ingredientId, branch_id: parseInt(branchId) }
-    });
-    return record ? parseFloat(record.quantity) : null;
-}
-
-async function getAllBranchStocksFromTable(ingredientId) {
-    const records = await BranchStock.findAll({
-        where: { ingredient_id: ingredientId }
-    });
-    if (records.length === 0) return null;
-    const map = {};
-    for (const r of records) map[String(r.branch_id)] = parseFloat(r.quantity);
-    return map;
-}
+// El stock por sucursal se lee y se escribe SOLO por utils/branchStock.js
+// (deuda §12.1). Aquí vivían dos helpers de lectura dual que además no llamaba
+// nadie: eran código muerto apuntando al JSON legado.
+const {
+    leerStockSucursal, escribirStockSucursal, lectorDeStock,
+    mapaSumaTodasSucursales, respaldarJsonEnTabla,
+} = require('../utils/branchStock');
 
 // La tabla de conversión vive en utils/unidades.js (BLOQUE 12): estaba duplicada
 // aquí y en routes/orders.js. Si las dos copias se desviaban, el sistema
@@ -118,27 +107,9 @@ router.get('/products-stock', authenticate, async (req, res) => {
             }
         }
 
-        // Precargar stocks de tabla BranchStock para todos los ingredientes de una vez
+        // Stock de todos los insumos implicados en UNA sola consulta (§12.1).
         const allIngIds = [...new Set([...ingIds, ...(Object.values(prepItemsMap).flat().map(pi => pi.ingredient_id))])];
-        const tableStockMap = {};
-        if (branchId && allIngIds.length > 0) {
-            const { Op: Op2 } = require('sequelize');
-            const bsRecords = await BranchStock.findAll({
-                where: { ingredient_id: { [Op2.in]: allIngIds }, branch_id: parseInt(branchId) }
-            });
-            for (const r of bsRecords) tableStockMap[r.ingredient_id] = parseFloat(r.quantity);
-        }
-
-        function getStock(ing) {
-            if (!branchId) return parseFloat(ing.stock) || 0;
-            // Tabla primero
-            if (ing.id in tableStockMap) return tableStockMap[ing.id];
-            // Fallback JSON
-            const bs = ing.branch_stocks || {};
-            return Object.keys(bs).length > 0
-                ? parseFloat(bs[branchId] ?? 0)
-                : parseFloat(ing.stock) || 0;
-        }
+        const getStock = await lectorDeStock(allIngIds, branchId);
 
         const result = {};
         for (const productId of productIds) {
@@ -197,60 +168,24 @@ router.get('/ingredients', authenticate, async (req, res) => {
             limit,
             offset
         });
-        if (branchId) {
-            // Precargar de tabla BranchStock
-            const ingIds = ingredients.map(i => i.id);
-            const { Op: Op2 } = require('sequelize');
-            const bsRecords = ingIds.length > 0
-                ? await BranchStock.findAll({ where: { ingredient_id: { [Op2.in]: ingIds }, branch_id: parseInt(branchId) } })
-                : [];
-            const tableMap = {};
-            for (const r of bsRecords) tableMap[r.ingredient_id] = parseFloat(r.quantity);
+        const ingIds = ingredients.map(i => i.id);
 
+        if (branchId) {
+            const stockDe = await lectorDeStock(ingIds, branchId);
             const result = ingredients.map(ing => {
                 const plain = ing.toJSON();
-                // Tabla primero
-                if (ing.id in tableMap) {
-                    plain.stock = tableMap[ing.id];
-                } else {
-                    // Fallback JSON
-                    const bs = ing.branch_stocks || {};
-                    if (branchId in bs) {
-                        plain.stock = parseFloat(bs[branchId]);
-                    } else if (Object.keys(bs).length === 0) {
-                        plain.stock = parseFloat(ing.stock) || 0;
-                    } else {
-                        plain.stock = 0;
-                    }
-                }
+                plain.stock = stockDe(ing);
                 return plain;
             });
             return res.json(paginatedResponse(result, count, page, limit));
         }
-        // Sin sucursal: sumar todos los stocks
-        const ingIds = ingredients.map(i => i.id);
-        const { Op: Op3 } = require('sequelize');
-        const allBsRecords = ingIds.length > 0
-            ? await BranchStock.findAll({ where: { ingredient_id: { [Op3.in]: ingIds } } })
-            : [];
-        const tableSumMap = {};
-        for (const r of allBsRecords) {
-            tableSumMap[r.ingredient_id] = (tableSumMap[r.ingredient_id] || 0) + parseFloat(r.quantity);
-        }
 
+        // Sin sucursal: sumar el stock de todas. Un insumo que no está repartido
+        // (ninguna fila en la tabla) conserva su stock global, que es su verdad.
+        const sumas = await mapaSumaTodasSucursales(ingIds);
         const result = ingredients.map(ing => {
             const plain = ing.toJSON();
-            // Tabla primero
-            if (ing.id in tableSumMap) {
-                plain.stock = tableSumMap[ing.id];
-            } else {
-                // Fallback JSON
-                const bs = ing.branch_stocks || {};
-                const vals = Object.values(bs);
-                if (vals.length > 0) {
-                    plain.stock = vals.reduce((s, v) => s + (parseFloat(v) || 0), 0);
-                }
-            }
+            if (ing.id in sumas) plain.stock = sumas[ing.id];
             return plain;
         });
         res.json(paginatedResponse(result, count, page, limit));
@@ -609,25 +544,10 @@ router.post('/movements', authenticate, async (req, res) => {
             return res.status(404).json({ error: 'Insumo no encontrado' });
         }
 
-        // Stock antes del ajuste (para auditoría) — lectura dual
+        // Stock antes del ajuste (para auditoría). Bloquea la fila dentro de la
+        // transacción: dos movimientos a la vez no pueden partir del mismo número.
         const branchKey = branch_id ? String(branch_id) : null;
-        let stockAntes;
-        if (branchKey) {
-            const bsRecord = await BranchStock.findOne({
-                where: { ingredient_id, branch_id: parseInt(branchKey) },
-                transaction: t, lock: t.LOCK.UPDATE
-            });
-            if (bsRecord) {
-                stockAntes = parseFloat(bsRecord.quantity);
-            } else {
-                const bs = ingredient.branch_stocks || {};
-                if (branchKey in bs) stockAntes = parseFloat(bs[branchKey]);
-                else if (Object.keys(bs).length === 0) stockAntes = parseFloat(ingredient.stock) || 0;
-                else stockAntes = 0;
-            }
-        } else {
-            stockAntes = parseFloat(ingredient.stock);
-        }
+        const stockAntes = await leerStockSucursal(ingredient, branchKey, t);
 
         const movement = await InventoryMovement.create({
             ingredient_id, type, quantity, unit_cost, reason, notes,
@@ -641,13 +561,7 @@ router.post('/movements', authenticate, async (req, res) => {
         if (type === 'entrada') {
             newStock += parseFloat(quantity);
             if (branchKey) {
-                // Escritura dual: tabla + JSON
-                await BranchStock.upsert({
-                    ingredient_id, branch_id: parseInt(branchKey),
-                    quantity: newStock, business_id: biz
-                }, { transaction: t });
-                const bs = { ...(ingredient.branch_stocks || {}), [branchKey]: newStock };
-                await ingredient.update({ branch_stocks: bs }, { transaction: t });
+                await escribirStockSucursal(ingredient, branchKey, newStock, t);
             } else if (unit_cost) {
                 const totalValue = (parseFloat(ingredient.stock) * parseFloat(ingredient.cost_per_unit)) +
                                    (parseFloat(quantity) * parseFloat(unit_cost));
@@ -658,27 +572,10 @@ router.post('/movements', authenticate, async (req, res) => {
             }
         } else if (type === 'salida') {
             newStock -= parseFloat(quantity);
-            if (branchKey) {
-                await BranchStock.upsert({
-                    ingredient_id, branch_id: parseInt(branchKey),
-                    quantity: newStock, business_id: biz
-                }, { transaction: t });
-                const bs = { ...(ingredient.branch_stocks || {}), [branchKey]: newStock };
-                await ingredient.update({ branch_stocks: bs }, { transaction: t });
-            } else {
-                await ingredient.update({ stock: newStock }, { transaction: t });
-            }
+            await escribirStockSucursal(ingredient, branchKey, newStock, t);
         } else if (type === 'ajuste') {
-            if (branchKey) {
-                await BranchStock.upsert({
-                    ingredient_id, branch_id: parseInt(branchKey),
-                    quantity: parseFloat(quantity), business_id: biz
-                }, { transaction: t });
-                const bs = { ...(ingredient.branch_stocks || {}), [branchKey]: parseFloat(quantity) };
-                await ingredient.update({ branch_stocks: bs }, { transaction: t });
-            } else {
-                await ingredient.update({ stock: quantity }, { transaction: t });
-            }
+            newStock = parseFloat(quantity);
+            await escribirStockSucursal(ingredient, branchKey, newStock, t);
         }
         await t.commit();
 
@@ -726,44 +623,23 @@ router.post('/movements', authenticate, async (req, res) => {
 // MIGRACIÓN: branch_stocks JSON → tabla BranchStock
 // GET /api/inventory/migrate-branch-stocks (solo owner)
 // ============================================
+// Desde el 2026-09-04 el respaldo corre SOLO en cada arranque (runMigrations,
+// §12.1), así que este endpoint ya no es necesario: se queda como botón manual
+// para volver a pasarlo sobre un negocio concreto. Delega en el mismo código.
+//
+// ⚠️ Ya no pisa lo que haya en la tabla. La versión anterior hacía `upsert` de
+// todo el JSON, así que re-ejecutarla podía SOBRESCRIBIR el stock real con un
+// valor viejo del JSON. Ahora solo rellena los pares que faltan.
 router.get('/migrate-branch-stocks', authenticate, isOwner, async (req, res) => {
-    const t = await sequelize.transaction();
     try {
-        const biz = req.user.business_id;
-        const ingredients = await Ingredient.findAll({
-            where: { business_id: biz, active: true },
-            transaction: t
-        });
-
-        let migrated = 0;
-        let skipped = 0;
-
-        for (const ing of ingredients) {
-            const bs = ing.branch_stocks || {};
-            const entries = Object.entries(bs);
-            if (entries.length === 0) { skipped++; continue; }
-
-            for (const [branchId, qty] of entries) {
-                const quantity = parseFloat(qty) || 0;
-                await BranchStock.upsert({
-                    ingredient_id: ing.id,
-                    branch_id: parseInt(branchId),
-                    quantity,
-                    business_id: biz
-                }, { transaction: t });
-            }
-            migrated++;
-        }
-
-        await t.commit();
+        const r = await respaldarJsonEnTabla(req.user.business_id);
         res.json({
-            message: 'Migración completada',
-            total_ingredientes: ingredients.length,
-            migrados: migrated,
-            sin_branch_stocks: skipped
+            message: 'Respaldo completado',
+            pares_revisados: r.revisados,
+            pares_copiados: r.copiados,
+            pares_ya_en_tabla: r.omitidos
         });
     } catch (error) {
-        await t.rollback();
         logger.error('migrate-branch-stocks error:', error);
         res.status(500).json({ error: 'Error en la migración' });
     }

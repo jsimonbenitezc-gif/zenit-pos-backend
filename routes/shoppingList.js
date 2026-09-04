@@ -6,13 +6,13 @@ const {
     ShoppingList,
     ShoppingListItem,
     Ingredient,
-    BranchStock,
     Branch,
     sequelize
 } = require('../models');
 const { authenticate } = require('../middleware/auth');
 const { requirePremium } = require('../middleware/checkPlan');
 const { enviarNotificacion } = require('../utils/push');
+const { lectorDeStock } = require('../utils/branchStock');
 
 // Todas las rutas requieren sesión y plan premium (la lista de compras vive con
 // el módulo de inventario, que es premium).
@@ -71,16 +71,8 @@ async function serializarLista(lista) {
     };
 }
 
-// Lee el stock de un ingrediente en una sucursal (tabla primero, fallback JSON,
-// fallback stock global).
-function leerStock(ing, branchId, tableStockMap) {
-    if (branchId === null) return parseFloat(ing.stock) || 0;
-    if (ing.id in tableStockMap) return tableStockMap[ing.id];
-    const bs = ing.branch_stocks || {};
-    return Object.keys(bs).length > 0
-        ? parseFloat(bs[String(branchId)] ?? 0)
-        : parseFloat(ing.stock) || 0;
-}
+// El stock por sucursal lo resuelve utils/branchStock.js (§12.1). Aquí había una
+// séptima copia de "tabla primero, fallback JSON".
 
 // GET /api/shopping-list?branch_id=X  → lista activa de la sucursal
 router.get('/', async (req, res) => {
@@ -108,19 +100,13 @@ router.get('/inventory-options', async (req, res) => {
         });
 
         const ingIds = ingredients.map(i => i.id);
-        const tableStockMap = {};
-        if (branchId !== null && ingIds.length > 0) {
-            const records = await BranchStock.findAll({
-                where: { ingredient_id: { [Op.in]: ingIds }, branch_id: branchId }
-            });
-            for (const r of records) tableStockMap[r.ingredient_id] = parseFloat(r.quantity);
-        }
+        const stockDe = await lectorDeStock(ingIds, branchId);
 
         const opciones = ingredients.map(ing => ({
             ingredient_id: ing.id,
             name: ing.name,
             unit: ing.unit,
-            current_stock: leerStock(ing, branchId, tableStockMap),
+            current_stock: stockDe(ing),
             min_stock: parseFloat(ing.min_stock) || 0
         }));
 
@@ -144,13 +130,7 @@ router.post('/generate', async (req, res) => {
         });
         const ingIds = ingredients.map(i => i.id);
 
-        const tableStockMap = {};
-        if (branchId !== null && ingIds.length > 0) {
-            const records = await BranchStock.findAll({
-                where: { ingredient_id: { [Op.in]: ingIds }, branch_id: branchId }
-            });
-            for (const r of records) tableStockMap[r.ingredient_id] = parseFloat(r.quantity);
-        }
+        const stockDe = await lectorDeStock(ingIds, branchId);
 
         // Items 'auto' que ya existen (para no duplicar por ingrediente)
         const existentes = await ShoppingListItem.findAll({
@@ -162,7 +142,7 @@ router.post('/generate', async (req, res) => {
         for (const ing of ingredients) {
             const min = parseFloat(ing.min_stock) || 0;
             if (min <= 0) continue; // sin mínimo definido no se considera "bajo"
-            const actual = leerStock(ing, branchId, tableStockMap);
+            const actual = stockDe(ing);
             if (actual > min) continue; // hay suficiente
             if (yaEnLista.has(ing.id)) continue; // ya está en la lista
 
@@ -207,12 +187,8 @@ router.post('/items', async (req, res) => {
             if (!ing) return res.status(404).json({ error: 'Insumo no encontrado' });
             unit = ing.unit;
             min_stock = parseFloat(ing.min_stock) || 0;
-            const tableStockMap = {};
-            if (branchId !== null) {
-                const rec = await BranchStock.findOne({ where: { ingredient_id: ingId, branch_id: branchId } });
-                if (rec) tableStockMap[ingId] = parseFloat(rec.quantity);
-            }
-            current_stock = leerStock(ing, branchId, tableStockMap);
+            const stockDe = await lectorDeStock([ingId], branchId);
+            current_stock = stockDe(ing);
         }
 
         const item = await ShoppingListItem.create({

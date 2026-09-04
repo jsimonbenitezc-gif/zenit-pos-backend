@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const logger = require('../utils/logger');
-const { Order, OrderItem, OrderPayment, Product, Customer, Table, ProductRecipe, Ingredient, Preparation, PreparationItem, PrivilegedActionLog, BranchStock, User, Discount, ModifierOptionRecipe, sequelize } = require('../models');
+const { Order, OrderItem, OrderPayment, Product, Customer, Table, ProductRecipe, Ingredient, Preparation, PreparationItem, PrivilegedActionLog, User, Discount, ModifierOptionRecipe, sequelize } = require('../models');
 const { authenticate } = require('../middleware/auth');
 const { autorizarAccionPrivilegiada } = require('../utils/verifyPin');
 const { resolverBranchId, BranchError } = require('../utils/branch');
@@ -14,6 +14,7 @@ const {
 } = require('../utils/modificadores');
 const { convertirCantidad } = require('../utils/unidades');
 const { fraccionDeTanda } = require('../utils/preparaciones');
+const { leerStockSucursal, escribirStockSucursal } = require('../utils/branchStock');
 const { evaluarHorario, avisarFueraDeHorario } = require('../utils/horarios');
 const { Op } = require('sequelize');
 const { notificarAudit } = require('./audit');
@@ -55,41 +56,11 @@ function convertirUnidad(cantidad, unidadReceta, ingrediente) {
     return convertirCantidad(cantidad, unidadReceta, ingrediente.unit);
 }
 
-// Helpers de stock por sucursal (lectura dual: tabla BranchStock primero, fallback JSON)
-async function getBranchStock(ingredient, branchId, transaction) {
-    if (!branchId) return parseFloat(ingredient.stock);
-    // Tabla primero
-    const record = await BranchStock.findOne({
-        where: { ingredient_id: ingredient.id, branch_id: parseInt(branchId) },
-        ...(transaction ? { transaction, lock: transaction.LOCK.UPDATE } : {})
-    });
-    if (record) return parseFloat(record.quantity);
-    // Fallback JSON
-    const bs = ingredient.branch_stocks || {};
-    const key = String(branchId);
-    if (key in bs) return parseFloat(bs[key]);
-    if (Object.keys(bs).length === 0) return parseFloat(ingredient.stock) || 0;
-    return 0;
-}
-
-// Escritura dual: tabla BranchStock + campo JSON (coexistencia)
-async function setBranchStock(ingredient, branchId, newStock, transaction) {
-    if (!branchId) {
-        await ingredient.update({ stock: newStock }, { transaction });
-    } else {
-        // Escribir en tabla BranchStock
-        await BranchStock.upsert({
-            ingredient_id: ingredient.id,
-            branch_id: parseInt(branchId),
-            quantity: newStock,
-            business_id: ingredient.business_id
-        }, { transaction });
-        // Dual-write: actualizar también el campo JSON
-        const bs = { ...(ingredient.branch_stocks || {}) };
-        bs[String(branchId)] = newStock;
-        await ingredient.update({ branch_stocks: bs }, { transaction });
-    }
-}
+// Stock por sucursal: UNA sola fuente, la tabla `branch_stocks` (deuda §12.1).
+// La lógica vive en utils/branchStock.js; aquí solo quedan los nombres con los que
+// la llama todo este archivo. El JSON legado ya no se lee ni se escribe.
+const getBranchStock = leerStockSucursal;
+const setBranchStock = escribirStockSucursal;
 
 // Descuenta ingredientes según la receta del producto al registrar una venta
 async function descontarIngredientesDeReceta(productId, qty, t, branchId = null) {
@@ -339,7 +310,7 @@ async function procesarNotificacionesVenta(biz, resolvedItems, branchId, finalTo
             const recetaItems = await ProductRecipe.findAll({ where: { product_id: product.id } });
             for (const ri of recetaItems) {
                 if (ri.item_type === 'ingredient' && !ingNotificados.has(ri.item_id)) {
-                    const ing = await Ingredient.findByPk(ri.item_id, { attributes: ['id', 'name', 'stock', 'min_stock', 'branch_stocks', 'business_id'] });
+                    const ing = await Ingredient.findByPk(ri.item_id, { attributes: ['id', 'name', 'stock', 'min_stock', 'business_id'] });
                     if (!ing) continue;
                     const stockActual = await getBranchStock(ing, branchId);
                     const minStock = parseFloat(ing.min_stock) || 0;

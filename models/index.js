@@ -543,6 +543,29 @@ const runMigrations = async () => {
             }
         }
     }
+
+    // ── STOCK POR SUCURSAL: respaldar el JSON legado en la tabla (deuda §12.1) ──
+    // Va FUERA del bloque de Postgres a propósito: está escrito con Sequelize, no
+    // con SQL de un dialecto, así que también corre en los tests (SQLite) y ahí se
+    // puede probar. Es idempotente: en cuanto la tabla tiene el par, no hace nada.
+    //
+    // 🔴 De esto depende que no se borre un inventario. La columna JSON dejó de
+    // leerse en este mismo despliegue, así que un par que solo estuviera en el JSON
+    // pasaría a leer 0. En producción eran 10 de 17 pares, la sucursal 3 entera.
+    //
+    // El require es perezoso porque utils/branchStock.js importa este mismo módulo:
+    // pedirlo arriba sería una dependencia circular y llegaría a medio construir.
+    try {
+        const { respaldarJsonEnTabla } = require('../utils/branchStock');
+        const r = await respaldarJsonEnTabla();
+        if (r.copiados > 0) {
+            console.log(`✅ Stock por sucursal: ${r.copiados} pares respaldados del JSON legado a branch_stocks`);
+        }
+    } catch (err) {
+        // Ruidoso a propósito: si esto falla, el inventario por sucursal de un
+        // negocio que aún dependiera del JSON leería mal, y hay que enterarse.
+        console.error('❌ ERROR respaldando branch_stocks (revisar inventario por sucursal):', err.message);
+    }
 };
 
 // Sincronizar base de datos

@@ -40,18 +40,15 @@ const Ingredient = sequelize.define('Ingredient', {
         type: DataTypes.INTEGER,
         allowNull: true
     },
-    branch_stocks: {
-        type: DataTypes.TEXT,
-        allowNull: true,
-        get() {
-            const raw = this.getDataValue('branch_stocks');
-            if (!raw) return {};
-            try { return JSON.parse(raw); } catch { return {}; }
-        },
-        set(val) {
-            this.setDataValue('branch_stocks', val ? JSON.stringify(val) : null);
-        }
-    }
+    // ⚠️ AQUÍ VIVÍA `branch_stocks` (columna TEXT con un JSON {sucursal: cantidad}).
+    // Se retiró del modelo el 2026-09-04 al cerrar la deuda §12.1: el stock por
+    // sucursal tiene UNA sola fuente, la tabla `branch_stocks` (modelo BranchStock),
+    // y se lee y escribe SOLO por utils/branchStock.js.
+    //
+    // La COLUMNA sigue existiendo en Postgres, congelada con los datos del día del
+    // cambio, como copia de respaldo. Quitarla del modelo es justamente lo que
+    // impide que alguien vuelva a leerla o escribirla sin darse cuenta: Sequelize
+    // ignora en silencio los atributos que no declara (la lección del §25).
 }, {
     tableName: 'ingredients',
     timestamps: true

@@ -1,8 +1,9 @@
 const express = require('express');
 const router = express.Router();
 const logger = require('../utils/logger');
-const { Order, OrderItem, Product, Customer, Ingredient, BranchStock, sequelize } = require('../models');
+const { Order, OrderItem, Product, Customer, Ingredient, sequelize } = require('../models');
 const { authenticate } = require('../middleware/auth');
+const { lectorDeStock } = require('../utils/branchStock');
 const { Op } = require('sequelize');
 const { filtroVentaContable } = require('../utils/ordersFilter');
 const { requirePremium } = require('../middleware/checkPlan');
@@ -132,30 +133,14 @@ router.get('/dashboard', authenticate, async (req, res) => {
             raw: true
         });
 
-        // 5. INSUMOS CON STOCK BAJO — tabla BranchStock primero, fallback JSON
+        // 5. INSUMOS CON STOCK BAJO — el stock por sucursal sale de utils/branchStock.js (§12.1)
         const branchIdStr = req.query.branch_id ? String(req.query.branch_id) : null;
         let productosStockBajo, productosStockBajoLista;
         if (branchIdStr) {
             const allIngredients = await Ingredient.findAll({
                 where: { business_id: biz, active: true, min_stock: { [Op.gt]: 0 } }
             });
-            // Precargar de tabla BranchStock
-            const ingIds = allIngredients.map(i => i.id);
-            const bsRecords = ingIds.length > 0
-                ? await BranchStock.findAll({ where: { ingredient_id: { [Op.in]: ingIds }, branch_id: parseInt(branchIdStr) } })
-                : [];
-            const tableMap = {};
-            for (const r of bsRecords) tableMap[r.ingredient_id] = parseFloat(r.quantity);
-
-            const getBranchStk = ing => {
-                // Tabla primero
-                if (ing.id in tableMap) return tableMap[ing.id];
-                // Fallback JSON
-                const bs = ing.branch_stocks || {};
-                if (branchIdStr in bs) return parseFloat(bs[branchIdStr]);
-                if (Object.keys(bs).length === 0) return parseFloat(ing.stock) || 0;
-                return 0;
-            };
+            const getBranchStk = await lectorDeStock(allIngredients.map(i => i.id), branchIdStr);
             const lowStock = allIngredients.filter(ing => getBranchStk(ing) < parseFloat(ing.min_stock));
             productosStockBajo = lowStock.length;
             productosStockBajoLista = lowStock.slice(0, 10).map(ing => ({
