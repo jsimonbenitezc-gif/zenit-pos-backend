@@ -96,7 +96,26 @@ async function verificarPinDePerfil({ businessId, role, pin, branchId = null }) 
     // `sinPin` distingue "este puesto NO tiene PIN configurado" de "el PIN está
     // mal". No es lo mismo y quien llama necesita poder decidir: ver
     // `autorizarAccionPrivilegiada`.
-    if (!rolData) return { ...vacio, ownerId: owner.id };
+    if (!rolData) {
+        // ⚠️ EL DUEÑO NO ES UN PUESTO. `permisos_roles` guarda los puestos que el
+        // dueño configura (cajero, encargado, los custom); él mismo nunca está ahí,
+        // porque su credencial es la de la CUENTA. Sin esta rama, un equipo que
+        // opera como "Administrador" —lo que hace TODA cuenta recién creada, que
+        // nace sin puestos— recibía 400 "Se requiere PIN para esta acción" al
+        // cancelar un pedido, devolverlo, editar un cliente o mover la caja: la
+        // quinta cara de la trampa del §19.19, esta vez pidiendo un PIN que por
+        // definición no puede existir. Lo encontró el recorrido `conectado` de
+        // pruebas-ui del desktop.
+        //
+        // Se autoriza confirmando, y SE SIGUE AUDITANDO: lo que se pierde es una
+        // barrera que nunca estuvo puesta, no el rastro. La barrera del dueño está
+        // antes, al entrar como Administrador (contraseña del equipo, §7).
+        //
+        // Cualquier OTRO rol desconocido sigue rechazándose: si se aceptara, un
+        // negocio con PIN en todos sus puestos podría saltárselo inventándose uno.
+        if (role === 'dueno') return { ...vacio, sinPin: true, ownerId: owner.id };
+        return { ...vacio, ownerId: owner.id };
+    }
     if (!rolData.pin_set) return { ...vacio, sinPin: true, ownerId: owner.id };
 
     // El puesto SÍ tiene PIN configurado pero no llegó ninguno: inválido.

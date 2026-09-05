@@ -328,3 +328,81 @@ describe('§12.2 — Puesto SIN PIN configurado', () => {
         expect(res.status).toBe(403);
     });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+describe('§46 — El DUEÑO no es un puesto', () => {
+
+    // LO QUE ESTABA ROTO (encontrado el 2026-09-05 por el banco de la interfaz
+    // del desktop, recorrido `conectado`): `permisos_roles` guarda los puestos
+    // que el dueño CONFIGURA (cajero, encargado, los custom). Él nunca está ahí.
+    // Como el POS manda el puesto activo y el de una cuenta recién creada es
+    // "Administrador" (`role: 'dueno'`), `verificarPinDePerfil` no encontraba el
+    // rol, lo trataba como PIN inválido y la ruta respondía 400 "Se requiere PIN
+    // para esta acción" — un PIN que por definición no puede existir.
+    //
+    // Resultado: TODA cuenta nueva —que nace sin puestos configurados— no podía
+    // cancelar un pedido, devolverlo, editar un cliente ni mover la caja. Es la
+    // quinta cara de la trampa del §19.19.
+
+    test('El dueño cancela confirmando, sin teclear ningún PIN', async () => {
+        await configurarPuesto({ conPin: true });   // los demás puestos SÍ tienen PIN
+        const pedido = (await venta()).body;
+
+        const res = await request(app)
+            .put(`/api/orders/${pedido.id}/status`)
+            .set(auth(ownerToken))
+            .send({ status: 'cancelado', role: 'dueno', employee_name: 'Simón' });
+
+        expect(res.status).toBe(200);
+        expect(res.body.status).toBe('cancelado');
+    });
+
+    test('Y su cancelación queda auditada igual que cualquier otra', async () => {
+        const pedido = (await venta()).body;
+
+        await request(app)
+            .put(`/api/orders/${pedido.id}/status`)
+            .set(auth(ownerToken))
+            .send({ status: 'cancelado', role: 'dueno', employee_name: 'Simón' });
+
+        const logs = await models.PrivilegedActionLog.findAll({ where: { action_type: 'cancel_order' } });
+        expect(logs).toHaveLength(1);
+        expect(logs[0].employee_name).toBe('Simón');
+    });
+
+    test('El dueño también puede devolver y editar un cliente', async () => {
+        const pedido = (await venta()).body;
+        await request(app)
+            .put(`/api/orders/${pedido.id}/status`)
+            .set(auth(ownerToken))
+            .send({ status: 'completado' });
+
+        const devolucion = await request(app)
+            .post(`/api/orders/${pedido.id}/devolucion`)
+            .set(auth(ownerToken))
+            .send({ role: 'dueno', employee_name: 'Simón', motivo: 'plato frío' });
+        expect(devolucion.status).toBe(200);
+
+        const edicion = await request(app)
+            .put(`/api/customers/${cliente.id}`)
+            .set(auth(ownerToken))
+            .send({ name: 'Cliente Corregido', role: 'dueno', employee_name: 'Simón' });
+        expect(edicion.status).toBe(200);
+    });
+
+    test('La puerta NO se abrió para cualquier rol inventado', async () => {
+        // Sin esta comprobación, el arreglo de arriba sería un agujero: bastaría
+        // con mandar un puesto que no existe para saltarse el PIN de todos.
+        await configurarPuesto({ conPin: true });
+        const pedido = (await venta()).body;
+
+        const res = await request(app)
+            .put(`/api/orders/${pedido.id}/status`)
+            .set(auth(ownerToken))
+            .send({ status: 'cancelado', role: 'gerente_inventado', employee_name: 'X' });
+
+        expect([400, 403]).toContain(res.status);
+        const pedidoTrasIntento = await models.Order.findByPk(pedido.id);
+        expect(pedidoTrasIntento.status).not.toBe('cancelado');
+    });
+});
