@@ -14,7 +14,7 @@ const {
     sequelize
 } = require('../models');
 const { authenticate, isOwner } = require('../middleware/auth');
-const { verifyEmployeePin } = require('../utils/verifyPin');
+const { verifyEmployeePin, autorizarAccionPrivilegiada } = require('../utils/verifyPin');
 const { requirePremium } = require('../middleware/checkPlan');
 const { configurarSSE } = require('../utils/sse');
 const { notificarAudit } = require('./audit');
@@ -517,25 +517,35 @@ router.post('/movements', authenticate, async (req, res) => {
     const t = await sequelize.transaction();
     try {
         const biz = req.user.business_id;
-        const { ingredient_id, type, quantity, unit_cost, reason, notes, branch_id, employee_id, pin, employee_name } = req.body;
+        const { ingredient_id, type, quantity, unit_cost, reason, notes, branch_id, employee_id, pin, employee_name, role } = req.body;
         if (!ingredient_id || !type || !quantity) {
             await t.rollback();
             return res.status(400).json({ error: 'ingredient_id, tipo y cantidad son requeridos' });
         }
 
-        // Ajuste manual: PIN obligatorio
+        // Autorización con PIN.
+        //
+        // ⚠️ Se acepta el PIN de PUESTO, no solo la contraseña de cuenta (§19.19).
+        // Antes esto llamaba a verifyEmployeePin() a secas, que solo entiende la
+        // credencial de un User con email — y en el POS el cajero teclea el PIN de
+        // su PUESTO. La función nacía muerta ahí, igual que le pasó a cancelar
+        // pedido y a editar cliente. autorizarAccionPrivilegiada() acepta las dos.
+        //
+        // El PIN es OBLIGATORIO para 'ajuste' (fija el stock a un número). Para
+        // los demás tipos es opcional: si viene, se verifica y la acción queda
+        // AUDITADA — así una salida que el cliente considera sensible deja rastro
+        // sin que el servidor tenga que adivinar cuáles lo son.
         let authorizedEmployee = null;
-        if (type === 'ajuste') {
-            if (!employee_id || !pin) {
+        if (type === 'ajuste' || employee_id || role) {
+            const auth = await autorizarAccionPrivilegiada({
+                businessId: biz, actorId: req.user.id,
+                employee_id, employee_name, role, pin, branchId: req.user.branch_id,
+            });
+            if (!auth.ok) {
                 await t.rollback();
-                return res.status(400).json({ error: 'Se requiere PIN para esta acción' });
+                return res.status(auth.status || 403).json({ error: auth.error });
             }
-            try {
-                authorizedEmployee = await verifyEmployeePin(employee_id, pin, biz);
-            } catch (pinErr) {
-                await t.rollback();
-                return res.status(403).json({ error: pinErr.message });
-            }
+            authorizedEmployee = { id: auth.empleadoId, name: auth.nombre };
         }
 
         const ingredient = await Ingredient.findOne({ where: { id: ingredient_id, business_id: biz }, transaction: t });
@@ -579,8 +589,9 @@ router.post('/movements', authenticate, async (req, res) => {
         }
         await t.commit();
 
-        // Registrar en auditoría si fue un ajuste autorizado con PIN
-        if (type === 'ajuste' && authorizedEmployee) {
+        // Auditar CUALQUIER movimiento autorizado con PIN, no solo 'ajuste':
+        // antes una salida autorizada no dejaba rastro de quién la hizo.
+        if (authorizedEmployee) {
             const marcaHorario = await evaluarHorario(biz);
             await PrivilegedActionLog.create({
                 business_id: biz,
@@ -590,7 +601,7 @@ router.post('/movements', authenticate, async (req, res) => {
                 action_type: 'inventory_adjustment',
                 target_description: `Insumo: ${ingredient.name}`,
                 before_data: JSON.stringify({ ingredient_id, name: ingredient.name, stock: stockAntes }),
-                after_data: JSON.stringify({ ingredient_id, name: ingredient.name, stock: parseFloat(quantity), reason: reason || null }),
+                after_data: JSON.stringify({ ingredient_id, name: ingredient.name, stock: newStock, tipo: type, cantidad: parseFloat(quantity), reason: reason || null }),
                 fuera_horario: marcaHorario.fuera
             });
             notificarAudit(biz);
@@ -600,13 +611,13 @@ router.post('/movements', authenticate, async (req, res) => {
         _notificarInventario(biz); // avisar a clientes SSE conectados
 
         // Push notification: ajuste de inventario manual
-        if (type === 'ajuste' && authorizedEmployee) {
+        if (authorizedEmployee) {
             const tipoTexto = type === 'entrada' ? 'Entrada' : type === 'salida' ? 'Salida' : 'Ajuste';
             enviarNotificacion(
                 biz,
                 'notif_ajuste_inventario',
                 `📦 ${tipoTexto} de inventario`,
-                `${authorizedEmployee.name} ajustó ${ingredient.name} → ${parseFloat(quantity)} ${ingredient.unit || ''}`
+                `${authorizedEmployee.name}: ${ingredient.name} quedó en ${newStock} ${ingredient.unit || ''}`
             );
         }
         const fullMovement = await InventoryMovement.findByPk(movement.id, {

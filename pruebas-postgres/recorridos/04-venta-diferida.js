@@ -31,6 +31,36 @@ const { LibroDeCaja } = require('../lib/libro');
 
 const FONDO_INICIAL = 500.00;
 
+// La zona con la que el sembrador crea el negocio (lib/sembrador.js).
+const TZ_NEGOCIO = 'America/Mexico_City';
+
+/** La fecha LOCAL (YYYY-MM-DD) de un instante, en la zona del negocio. */
+function _diaLocal(fecha, tz) {
+    return fecha.toLocaleDateString('en-CA', { timeZone: tz });
+}
+
+/**
+ * El instante que, en la zona del negocio, es el MEDIODÍA de ayer.
+ *
+ * Se calcula sin importar nada de `utils/`: este banco tiene que poder decir
+ * que el backend se equivoca, y para eso no puede usar las cuentas del backend
+ * (§38.3). Se parte del mediodía UTC del día anterior y se corrige con la hora
+ * local que reporte la zona, así que funciona con cualquier huso y con horario
+ * de verano.
+ */
+function _ayerAlMediodia(referencia, tz) {
+    const ayer = _diaLocal(new Date(referencia.getTime() - 24 * 60 * 60 * 1000), tz);
+    let instante = new Date(ayer + 'T12:00:00Z');
+    for (let i = 0; i < 3; i++) {
+        const horaLocal = Number(
+            instante.toLocaleString('en-US', { timeZone: tz, hour: '2-digit', hour12: false })
+        );
+        if (horaLocal === 12) break;
+        instante = new Date(instante.getTime() + (12 - horaLocal) * 60 * 60 * 1000);
+    }
+    return instante;
+}
+
 module.exports = {
     nombre: 'Ventas offline que suben tarde: día, turno y precio correctos',
     etiqueta: 'diferida',
@@ -51,9 +81,15 @@ module.exports = {
         const enMatriz = (cuerpo) => Object.assign({ branch_id: t.sucursales.matriz }, cuerpo);
 
         // ── 1. Una venta de AYER que sube ahora ─────────────────────────────
-        //    26 horas atrás: otro día local y, desde luego, antes de que este
-        //    turno abriera. No puede tocar este corte.
-        const ayer = new Date(apertura.getTime() - 26 * 60 * 60 * 1000);
+        //    Antes esto restaba 26 horas fijas, y era una BOMBA DE TIEMPO: si el
+        //    banco se corría entre las 00:00 y las 02:00 de la zona del negocio,
+        //    26 horas atrás caían en ANTEAYER y la comprobación de más abajo
+        //    ("la de ayer aparece en AYER") fallaba sin que nada estuviera roto.
+        //    Fallaba solo de madrugada, que es la peor clase de prueba: la que
+        //    enseña a desconfiar de la suite. Ahora se fija a MEDIODÍA de ayer
+        //    EN LA ZONA DEL NEGOCIO, que cae en el día correcto siempre y sigue
+        //    estando muy por delante de la apertura de este turno.
+        const ayer = _ayerAlMediodia(apertura, TZ_NEGOCIO);
 
         const ventaAyer = await api.exigir('POST', '/api/orders', enMatriz({
             items: [{ product_id: t.productos.pastor.id, quantity: 3, unit_price: t.productos.pastor.precio }],
