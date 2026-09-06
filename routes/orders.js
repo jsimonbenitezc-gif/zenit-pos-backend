@@ -246,6 +246,46 @@ async function acumularRequerimientosDeProducto(productId, qty, requerimientos, 
     }
 }
 
+// ─── ORDEN DE BLOQUEO: TODOS LOS INSUMOS DE LA VENTA, POR id ASCENDENTE ──────
+//
+// Un deadlock de Postgres no necesita nada raro: basta con que dos transacciones
+// bloqueen las MISMAS filas en ORDEN DISTINTO. Y eso es justo lo que hacía la
+// venta: `descontarIngredientesDeReceta` bloquea cada insumo según el orden en
+// que llegan las filas de la receta (un `findAll` sin ORDER BY, que Postgres no
+// garantiza) y según el orden de los productos del carrito.
+//
+// Con eso, dos cajas cobrando platos que comparten insumos se pisan:
+//     caja A toma "queso" y pide "pastor"
+//     caja B toma "pastor" y pide "queso"
+// Postgres lo detecta y ABORTA una de las dos: la venta muere con 500 y el
+// cajero ve "Error al guardar". Medido: 15 ventas simultáneas → hasta 10 caían.
+//
+// El arreglo es el canónico para esta familia de fallos: tomar TODOS los locks
+// de una vez y SIEMPRE en el mismo orden global (el id del insumo, que es un
+// criterio total y estable). A partir de aquí el orden en que cada receta los
+// vaya usando ya da igual: la transacción ya los tiene.
+//
+// ⚠️ Ordenar los `findAll` de las recetas NO basta, y es la trampa aquí: hace
+// determinista el orden DENTRO de un producto, pero dos ventas con conjuntos de
+// productos distintos que se solapan siguen cruzándose. El orden tiene que ser
+// global a la venta, no local a cada receta.
+async function bloquearInsumosEnOrden(resolvedItems, t) {
+    const requerimientos = new Map();
+    for (const { product, qty, modificadores } of resolvedItems) {
+        await acumularRequerimientosDeProducto(product.id, qty, requerimientos, t);
+        await acumularRequerimientosDeModificadores(modificadores, qty, requerimientos, t);
+    }
+    const ids = [...requerimientos.keys()].sort((a, b) => a - b);
+    if (!ids.length) return;
+
+    await Ingredient.findAll({
+        where: { id: { [Op.in]: ids } },
+        order: [['id', 'ASC']],
+        transaction: t,
+        lock: t.LOCK.UPDATE,
+    });
+}
+
 // Valida que haya stock suficiente para todos los items del pedido.
 // Retorna un array de warnings con los ingredientes insuficientes. Vacío = stock OK.
 async function validarStockIngredientes(resolvedItems, branchId, t) {
@@ -517,6 +557,38 @@ router.get('/:id', authenticate, async (req, res) => {
 
 // POST /api/orders
 router.post('/', createOrderLimiter, authenticate, async (req, res) => {
+    // ⚠️ LA CONFIGURACIÓN SE LEE ANTES DE ABRIR LA TRANSACCIÓN, Y NO ES ESTILO.
+    //
+    // Estas tres van cacheadas (60s), pero con el caché FRÍO cada una consulta la
+    // base por su cuenta y pide su PROPIA conexión del pool. Hacerlo mientras la
+    // transacción ya retiene la suya significa que cada venta necesita 2 conexiones
+    // a la vez —y `catalogoModificadores` lanza tres consultas en paralelo, así que
+    // son 4—. Con `pool.max: 10`, nueve ventas simultáneas con el caché frío tomaban
+    // las 10 conexiones para sus transacciones y se quedaban esperando la extra que
+    // ninguna podía soltar: un DEADLOCK DE POOL. Medido antes del arreglo: 11
+    // peticiones a la vez → las 11 mueren con ECONNRESET tras exactamente 30
+    // segundos (el `acquire` del pool), y el POS se queda sin poder cobrar.
+    //
+    // El caché se enfría solo cada 60s y al guardar ajustes, y el pool es de TODO
+    // el servidor —no de un negocio—, así que "nueve a la vez" es la suma de todos
+    // los negocios conectados. No era un caso extremo: era cuestión de tiempo.
+    //
+    // Leerlas aquí las deja resueltas antes de que exista la transacción, así que
+    // la venta entera consume UNA sola conexión. Son de solo lectura y no dependen
+    // de nada que se escriba dentro, de modo que el orden no cambia ninguna regla.
+    const bizPrevio = req.user.business_id;
+    let catalogoMods, cfgImpuestoNegocio, cfgPropinasNegocio;
+    try {
+        [catalogoMods, cfgImpuestoNegocio, cfgPropinasNegocio] = await Promise.all([
+            catalogoModificadores(bizPrevio),
+            configImpuestoNegocio(bizPrevio),
+            configPropinasNegocio(bizPrevio),
+        ]);
+    } catch (error) {
+        logger.error('Error al leer la configuración del negocio:', error);
+        return res.status(500).json({ error: 'Error interno del servidor' });
+    }
+
     const t = await sequelize.transaction();
 
     try {
@@ -672,10 +744,10 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
         // salió a un precio que hoy no existe, y el dueño debe poder verlo.
         const preciosDistintos = [];
 
-        // MODIFICADORES (BLOQUE 11). El catálogo se carga UNA vez por venta (va
-        // cacheado 60s) y se resuelve cada renglón contra él: el cliente manda
-        // qué opción eligió, nunca cuánto cuesta. Ver utils/modificadores.js.
-        const catalogoMods = await catalogoModificadores(biz);
+        // MODIFICADORES (BLOQUE 11). El catálogo se cargó UNA vez por venta, antes
+        // de abrir la transacción (ver la nota del pool arriba), y se resuelve cada
+        // renglón contra él: el cliente manda qué opción eligió, nunca cuánto
+        // cuesta. Ver utils/modificadores.js.
 
         for (const item of items) {
             const productId = item.product_id || item.id;
@@ -746,6 +818,11 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
 
         calculatedTotal = parseFloat(calculatedTotal.toFixed(2));
 
+        // Todos los insumos de esta venta, bloqueados de golpe y en orden de id.
+        // Va ANTES de validar el stock: si no, la validación leería un stock que
+        // otra venta simultánea todavía puede cambiar. Ver la nota de la función.
+        await bloquearInsumosEnOrden(resolvedItems, t);
+
         // Validar stock de ingredientes antes de crear el pedido.
         // Si falta stock y el cliente no ha confirmado con skip_stock_check, devolver warnings
         // para que el frontend muestre el modal "¿continuar?" al usuario.
@@ -811,7 +888,7 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
         // mismo total de siempre, así que un negocio sin impuesto no ve cambio.
         const baseGravable = parseFloat((calculatedTotal - discountAmt - loyaltyAmt).toFixed(2));
         const configImpuesto = resolverImpuestoVenta(
-            await configImpuestoNegocio(biz),
+            cfgImpuestoNegocio,
             req.body,
             esVentaDiferida
         );
@@ -826,7 +903,7 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
         // propósito: la propina no es venta, así que no entra en la base gravable
         // ni en `total`. Lo que el cliente entrega es `total + tip_amount`; lo que
         // el negocio vendió sigue siendo `total`. Ver utils/propinas.js.
-        const configPropinas = await configPropinasNegocio(biz);
+        const configPropinas = cfgPropinasNegocio;
         const propina = resolverPropina({
             config: configPropinas,
             tipAmount: tip_amount,
@@ -1058,6 +1135,17 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
 
 // POST /api/orders/:id/items  — agregar productos a un pedido abierto (para mesas)
 router.post('/:id/items', authenticate, async (req, res) => {
+    // El catálogo de modificadores, ANTES de la transacción: con el caché frío
+    // pide sus propias conexiones y hacerlo con la transacción abierta agota el
+    // pool. Ver la nota larga en POST / (arriba).
+    let catalogoMods;
+    try {
+        catalogoMods = await catalogoModificadores(req.user.business_id);
+    } catch (error) {
+        logger.error('Error al leer el catálogo de modificadores:', error);
+        return res.status(500).json({ error: 'Error interno del servidor' });
+    }
+
     const t = await sequelize.transaction();
     try {
         const biz = req.user.business_id;
@@ -1100,8 +1188,8 @@ router.post('/:id/items', authenticate, async (req, res) => {
         }
 
         // Catálogo de modificadores (BLOQUE 11): una comanda que se agrega a una
-        // mesa lleva extras igual que una venta de mostrador.
-        const catalogoMods = await catalogoModificadores(biz);
+        // mesa lleva extras igual que una venta de mostrador. Se cargó arriba,
+        // antes de abrir la transacción.
 
         let additionalTotal = 0;
         for (const item of items) {
@@ -1264,6 +1352,18 @@ router.delete('/:id/items/:itemId', authenticate, async (req, res) => {
 // 'registrado', aún sin elaborar). Un pedido ya elaborado (completado/entregado)
 // no se cancela: se usa la devolución (POST /:id/devolucion).
 router.put('/:id/status', authenticate, async (req, res) => {
+    // La config de propinas, ANTES de la transacción: con el caché frío consulta
+    // la base y pedir esa conexión con la transacción abierta agota el pool. Ver
+    // la nota larga en POST / (arriba). Esta ruta es la que cobra las mesas, así
+    // que quedarse colgada aquí es la caja sin poder cerrar una cuenta.
+    let cfgPropinasNegocio;
+    try {
+        cfgPropinasNegocio = await configPropinasNegocio(req.user.business_id);
+    } catch (error) {
+        logger.error('Error al leer la configuración de propinas:', error);
+        return res.status(500).json({ error: 'Error interno del servidor' });
+    }
+
     const t = await sequelize.transaction();
     try {
         const biz = req.user.business_id;
@@ -1354,7 +1454,7 @@ router.put('/:id/status', authenticate, async (req, res) => {
         // este el momento de registrarla. No toca `total`: es dinero del cliente
         // para el empleado. Una venta nunca falla por una propina inválida —
         // `resolverPropina` la deja en 0 (ver utils/propinas.js).
-        const configPropinas = await configPropinasNegocio(biz);
+        const configPropinas = cfgPropinasNegocio;
         if (status !== 'cancelado' && tip_amount !== undefined) {
             const propina = resolverPropina({
                 config: configPropinas,

@@ -41,9 +41,17 @@ const loginLimiter = rateLimit({
 });
 
 // Protección: máximo 5 registros por hora por IP
+// Registros por IP y hora. El default (5) es el de producción y no cambia.
+//
+// Se puede subir con REGISTER_MAX_POR_HORA porque el banco de pruebas (§38) crea
+// un negocio por recorrido contra 127.0.0.1, así que con seis recorridos el
+// último se queda sin cupo y falla por el LÍMITE, no por un defecto — y un banco
+// que se pone rojo por algo que no es un defecto deja de mirarse.
+const REGISTROS_POR_HORA = parseInt(process.env.REGISTER_MAX_POR_HORA, 10) || 5;
+
 const registerLimiter = rateLimit({
     windowMs: 60 * 60 * 1000, // 1 hora
-    max: 5,
+    max: REGISTROS_POR_HORA,
     message: { error: 'Demasiados registros desde esta IP. Intenta de nuevo en una hora.' },
     standardHeaders: true,
     legacyHeaders: false

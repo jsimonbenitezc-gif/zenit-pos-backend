@@ -82,6 +82,13 @@ async function arrancarServidor({ db, puerto, verboso = false }) {
         NODE_ENV: 'pruebas',
         PORT: String(puerto),
 
+        // Cada recorrido registra su propio negocio, y en producción sólo se
+        // permiten 5 registros por hora y por IP — aquí todos vienen de
+        // 127.0.0.1, así que del sexto recorrido en adelante el banco fallaría
+        // por el LÍMITE y no por un defecto. Se sube SOLO para las pruebas; el
+        // default de producción (5) sigue intacto en routes/auth.js.
+        REGISTER_MAX_POR_HORA: '200',
+
         DB_HOST: db.host,
         DB_PORT: String(db.port),
         DB_NAME: db.database,

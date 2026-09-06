@@ -39,9 +39,24 @@ router.get('/events', (req, res) => {
 });
 
 // GET /api/settings - Obtener ajustes del negocio
+//
+// ⚠️ SE LEEN LOS DEL NEGOCIO (`business_id`), NO LOS DEL USUARIO QUE PREGUNTA.
+//
+// Esta ruta leía `req.user.id`, así que un empleado con cuenta propia (los de
+// `POST /api/staff`, que entran por `/api/staff/login`) recibía **{}**: sus
+// settings, que están vacíos. Y de ahí colgaba todo lo demás — el POS de ese
+// empleado no veía `tax_enabled` y cobraba SIN impuesto mientras el backend
+// registraba la venta CON impuesto, que es exactamente el descuadre que el
+// BLOQUE 8 declara inaceptable (§29: el cajero pide un monto y el sistema
+// guarda otro). Tampoco veía las propinas, los `permisos_roles` (sin puestos no
+// hay PIN que validar), la moneda, el logo ni el horario.
+//
+// El resto del backend ya leía la config del DUEÑO en todas partes
+// (`getPrefs(business_id)`, `configImpuestoNegocio(biz)`…): esta ruta era la
+// única que no. Para un dueño no cambia nada — su `id` ES su `business_id`.
 router.get('/', authenticate, async (req, res) => {
     try {
-        const user = await User.findByPk(req.user.id, { attributes: ['id', 'settings'] });
+        const user = await User.findByPk(req.user.business_id, { attributes: ['id', 'settings'] });
         if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
         const settings = user.settings ? JSON.parse(user.settings) : {};
         res.json(settings);
