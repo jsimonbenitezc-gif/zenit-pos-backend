@@ -501,6 +501,44 @@ const runMigrations = async () => {
             console.error('❌ Error asegurando fuera_horario en privileged_action_logs:', err.message);
         }
 
+        // ── ÍNDICES DE LAS TABLAS QUE CRECEN SIN PARAR (2026-09-06) ─────────
+        //
+        // `orders` ya estaba bien cubierta, pero estas cuatro consultas no
+        // tenían índice y recorrían la tabla ENTERA. El detalle que las hace
+        // importantes: aquí conviven las filas de TODOS los negocios, así que
+        // "la tabla entera" crece con cada cliente nuevo — un negocio con 40
+        // productos acaba escaneando los 40.000 de la plataforma.
+        //
+        // Hoy no se nota (la base de producción tiene 5 pedidos). Se nota con
+        // volumen, y entonces se nota en todo a la vez.
+        try {
+            await sequelize.query(
+                'CREATE INDEX IF NOT EXISTS products_biz_idx ON products (business_id)'
+            );
+            await sequelize.query(
+                'CREATE INDEX IF NOT EXISTS categories_biz_idx ON categories (business_id)'
+            );
+            // El historial de entradas/salidas nunca se borra: es la tabla que
+            // más crece de todo el inventario.
+            await sequelize.query(
+                'CREATE INDEX IF NOT EXISTS inventory_movements_biz_idx ON inventory_movements (business_id, "createdAt" DESC)'
+            );
+            // El índice parcial de arriba solo sirve para el filtro "fuera de
+            // horario". La consulta NORMAL del historial de acciones sensibles
+            // —la que el dueño abre— no usaba ninguno.
+            await sequelize.query(
+                'CREATE INDEX IF NOT EXISTS pal_biz_idx ON privileged_action_logs (business_id, "createdAt" DESC)'
+            );
+            // Lo pide el reporte de rentabilidad y el de productos más vendidos:
+            // ambos agrupan los renglones por producto.
+            await sequelize.query(
+                'CREATE INDEX IF NOT EXISTS order_items_product_idx ON order_items (product_id)'
+            );
+            console.log('✅ Índices de listados verificados');
+        } catch (err) {
+            console.error('❌ Error creando los índices de listados:', err.message);
+        }
+
         // ── CERRAR LA BASE A LOS ROLES PÚBLICOS (auditoría 2026-07-27) ──────
         // Zenit NO usa PostgREST: se conecta con Sequelize por el pooler como
         // `postgres`, que es DUEÑO de las tablas y tiene `rolbypassrls = true`.
@@ -581,6 +619,24 @@ const runMigrations = async () => {
 };
 
 // Sincronizar base de datos
+// ⚠️ UN ARRANQUE ROTO TIENE QUE VERSE ROTO.
+//
+// Esta función se TRAGABA el error: si `sequelize.sync()` o `runMigrations()`
+// fallaban, se escribía una línea en el log y el servidor arrancaba igual,
+// respondiendo en `/health` que la base estaba `connected`. Un despliegue roto
+// se veía EXACTAMENTE igual que uno bueno.
+//
+// Y eso importa mucho aquí porque Render arranca con `node server.js`, no con
+// `npm start`, así que las migraciones de la CLI no corren nunca (§19.4):
+// `runMigrations()` es el único sitio donde viven las columnas nuevas de cada
+// bloque, el REVOKE + RLS de las 31 tablas y el respaldo del stock por
+// sucursal. Si eso falla y nadie se entera, el síntoma llega días después como
+// un 500 opaco —"relation X does not exist"— o, peor, como una tabla sin RLS.
+//
+// Ahora el error se propaga: `server.js` no llama a `listen()`, el proceso sale
+// con código 1 y Render marca el despliegue como fallido y CONSERVA la versión
+// anterior funcionando. Es la diferencia entre enterarse en el despliegue o
+// enterarse por un cliente.
 const syncDatabase = async () => {
     try {
         setupRelations();
@@ -593,7 +649,8 @@ const syncDatabase = async () => {
         await runMigrations();
 
     } catch (error) {
-        console.error('❌ Error syncing database:', error);
+        console.error('❌ Error preparando la base de datos — el arranque se ABORTA:', error);
+        throw error;
     }
 };
 

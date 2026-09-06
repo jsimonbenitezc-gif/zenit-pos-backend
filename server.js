@@ -13,6 +13,7 @@ if (faltantes.length > 0) {
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 const path = require('path');
 const { syncDatabase } = require('./models');
 const logger = require('./utils/logger');
@@ -53,6 +54,40 @@ app.use(helmet({
     contentSecurityPolicy: false,
     crossOriginEmbedderPolicy: false,
 }));
+
+// ─── TOPE GENERAL DE PETICIONES ──────────────────────────────────────────────
+//
+// Hasta ahora solo tenían límite algunas rutas puntuales (login, PIN, crear
+// pedido, productos). Las CARAS no: el reporte de rentabilidad cruza ventas con
+// recetas, las exportaciones recorren el histórico entero y el listado de
+// pedidos pagina sobre una tabla que solo crece. Cualquiera de ellas, pedida en
+// bucle, satura la ÚNICA instancia de Render y el pool de la base — que son
+// compartidos por TODOS los negocios. Es decir: un solo cliente, sin querer
+// (una app que reintenta en bucle tras un error), podía dejar sin servicio a
+// los demás.
+//
+// El número es deliberadamente ALTO: esto no es una cuota de uso, es un freno
+// de emergencia. Un local con cinco equipos sincronizando a la vez hace del
+// orden de 100 peticiones en un minuto; 600 deja muchísimo margen para el uso
+// normal y aun así corta en seco un bucle desbocado, que hace miles.
+//
+// ⚠️ NO se le pone `keyGenerator` propio a propósito: el de la librería ya
+// normaliza IPv6, y escribir uno a mano con `req.ip` pelado es un agujero
+// conocido (§27.2). Agrupa por IP, así que las cajas de un mismo local
+// comparten cupo — con este techo no estorba.
+const limiteGeneral = rateLimit({
+    windowMs: 60 * 1000,
+    max: parseInt(process.env.RATE_LIMIT_GENERAL, 10) || 600,
+    message: { error: 'Demasiadas peticiones. Espera un momento e intenta de nuevo.' },
+    standardHeaders: true,
+    legacyHeaders: false,
+    // El health check lo consulta el monitoreo cada pocos minutos y las rutas
+    // SSE son conexiones que duran hasta 55 minutos: contarlas no protege de
+    // nada y sí puede dejar a un negocio sin tiempo real o al monitoreo ciego
+    // justo cuando más falta hace.
+    skip: (req) => req.path === '/health' || req.path.endsWith('/events'),
+});
+app.use(limiteGeneral);
 
 // Billing (Stripe webhook necesita body sin parsear — DEBE ir antes de express.json)
 app.use('/api/billing', require('./routes/billing'));
@@ -172,9 +207,74 @@ app.use((req, res) => {
     res.status(404).json({ error: 'Endpoint not found' });
 });
 
+// ─── RED PARA ERRORES QUE NADIE ATRAPÓ ───────────────────────────────────────
+//
+// Sin esto, una promesa rechazada sin `catch` TUMBA el proceso en Node 15+ y el
+// negocio se queda sin servicio hasta que Render lo reinicia (~1 min en el plan
+// gratuito). Se registran para que queden en Sentry y en los logs con su causa,
+// en vez de morir con un volcado que nadie ve.
+//
+// ⚠️ En `uncaughtException` el proceso SÍ se cierra, a propósito: tras un error
+// no capturado el estado del proceso ya no es de fiar, y seguir sirviendo
+// ventas desde ahí es peor que reiniciar. Lo que se gana es que salga el motivo
+// en el log y que las peticiones en vuelo terminen antes de cerrar.
+process.on('unhandledRejection', (razon) => {
+    logger.error('Promesa rechazada sin manejar:', razon);
+});
+process.on('uncaughtException', (error) => {
+    logger.error('Excepción no capturada — el proceso se cierra:', error);
+    cerrarOrdenadamente('uncaughtException', 1);
+});
+
+let servidorHttp = null;
+let cerrando = false;
+
+// ─── CIERRE ORDENADO ─────────────────────────────────────────────────────────
+//
+// Render manda SIGTERM en CADA despliegue. Sin escucharlo, el proceso muere de
+// golpe: las peticiones a medio responder se cortan (una venta que ya se guardó
+// pero cuya respuesta nunca llega) y las conexiones de tiempo real caen sin
+// avisar. La idempotencia por `client_uuid` (§19.7) evita que se cobre dos veces
+// al reintentar, así que no se pierde dinero — pero el cajero ve un error cada
+// vez que subes una versión, y eso mina la confianza en el sistema.
+//
+// Aquí se deja de aceptar conexiones nuevas, se espera a que terminen las que
+// están en curso y se cierra el pool de la base. Si algo se atasca, el tope de
+// 10 segundos cierra igual: Render mata el proceso a los 30, y es mejor cerrar
+// nosotros y saber por qué.
+async function cerrarOrdenadamente(senal, codigoSalida = 0) {
+    if (cerrando) return;
+    cerrando = true;
+    logger.info(`${senal} recibido — cerrando ordenadamente...`);
+
+    const plazo = setTimeout(() => {
+        logger.error('El cierre ordenado tardó demasiado; se fuerza la salida.');
+        process.exit(codigoSalida);
+    }, 10000);
+    plazo.unref();
+
+    try {
+        if (servidorHttp) {
+            await new Promise((listo) => servidorHttp.close(listo));
+            logger.info('Servidor HTTP cerrado; no se aceptan peticiones nuevas.');
+        }
+        const sequelize = require('./config/database');
+        await sequelize.close();
+        logger.info('Conexiones a la base cerradas.');
+    } catch (error) {
+        logger.error('Error durante el cierre ordenado:', error);
+    } finally {
+        clearTimeout(plazo);
+        process.exit(codigoSalida);
+    }
+}
+
+process.on('SIGTERM', () => cerrarOrdenadamente('SIGTERM'));
+process.on('SIGINT', () => cerrarOrdenadamente('SIGINT'));
+
 // Sync database and start server
 syncDatabase().then(() => {
-    app.listen(PORT, () => {
+    servidorHttp = app.listen(PORT, () => {
         logger.info(`Zenit POS API running on http://localhost:${PORT}`);
         logger.info(`Environment: ${process.env.NODE_ENV}`);
         // Diagnóstico de zona horaria: en Render el offset es 0 (UTC). Los cortes de
@@ -192,6 +292,13 @@ syncDatabase().then(() => {
     // tests: `module.exports = app` no debe encender ningún cron.
     const { iniciarCronJobs } = require('./utils/cron-jobs');
     iniciarCronJobs();
+}).catch((error) => {
+    // La base no quedó lista (esquema o migraciones). NO se arranca el servidor:
+    // uno que responde con el esquema a medias hace más daño que uno que no
+    // responde — Render marca el despliegue como fallido y deja viva la versión
+    // anterior. Ver la nota en models/index.js → syncDatabase.
+    logger.error('No se pudo preparar la base de datos. El servidor NO arranca.', error);
+    process.exit(1);
 });
 
 module.exports = app;
