@@ -17,6 +17,19 @@ const TOLERANCIA_FUTURO_MS = 5 * 60 * 1000;
 // Una venta más vieja que esto es un reloj mal configurado, no una venta offline:
 // el desktop en modo local puro puede acumular días, pero no meses.
 const MAXIMO_ATRASO_MS = 30 * 24 * 60 * 60 * 1000;
+// ⚠️ LA EXCEPCIÓN, Y ES UNA SOLA: importar el historial de un negocio que venía
+// usando la app SIN CUENTA (BLOQUE 18, Etapa 3). Ahí las ventas sí tienen meses,
+// y son reales: el negocio las cobró de verdad y quiere llevárselas a su cuenta.
+//
+// Con la ventana de 30 días, migrar tres meses de historia dejaba TODAS esas
+// ventas fechadas hoy — y peor: al descartarse la fecha, `esVentaDiferida` pasa a
+// false y con ella se pierden también el precio y el impuesto congelados. El
+// historial migrado sería ficción.
+//
+// Esta ventana NO se aplica sola: la ruta la pide explícitamente y solo se la
+// concede al DUEÑO (routes/orders.js). El camino normal de venta —el del POS, el
+// que protege la guarda del §38.6— sigue con sus 30 días intactos.
+const MAXIMO_ATRASO_IMPORTACION_MS = 2 * 365 * 24 * 60 * 60 * 1000;
 // Techo absoluto del precio unitario: DECIMAL(10,2) desborda arriba de 99,999,999.99.
 const PRECIO_MAXIMO = 1000000;
 
@@ -24,10 +37,19 @@ const PRECIO_MAXIMO = 1000000;
  * Valida la hora que declara el cliente para una venta diferida.
  * @param {string|Date} soldAt   Timestamp ISO enviado por el cliente.
  * @param {Date} [ahora]         Inyectable para tests.
+ * @param {object} [opciones]
+ * @param {number} [opciones.atrasoMaximoMs]  Cuánto atrás se acepta. Por defecto
+ *        30 días; solo la importación de historial (BLOQUE 18) pide más, y solo
+ *        para el dueño. **No lo ensanches "por si acaso"**: esta ventana es lo
+ *        que impide que un equipo con el reloj mal —o un cliente manipulado—
+ *        meta ventas en un turno ya cerrado.
  * @returns {{ fecha: Date|null, motivo: 'ok'|'ausente'|'invalida'|'futura'|'futura_ajustada'|'antigua' }}
  *          `fecha` null = usar la hora del servidor.
  */
-function resolverFechaVenta(soldAt, ahora = new Date()) {
+function resolverFechaVenta(soldAt, ahora = new Date(), opciones = {}) {
+    const atrasoMaximoMs = Number.isFinite(opciones.atrasoMaximoMs) && opciones.atrasoMaximoMs > 0
+        ? opciones.atrasoMaximoMs
+        : MAXIMO_ATRASO_MS;
     if (soldAt === undefined || soldAt === null || soldAt === '') {
         return { fecha: null, motivo: 'ausente' };
     }
@@ -60,7 +82,7 @@ function resolverFechaVenta(soldAt, ahora = new Date()) {
     if (fecha.getTime() > ahora.getTime()) {
         return { fecha: new Date(ahora.getTime()), motivo: 'futura_ajustada' };
     }
-    if (fecha.getTime() < ahora.getTime() - MAXIMO_ATRASO_MS) {
+    if (fecha.getTime() < ahora.getTime() - atrasoMaximoMs) {
         return { fecha: null, motivo: 'antigua' };
     }
     return { fecha, motivo: 'ok' };
@@ -107,5 +129,6 @@ module.exports = {
     precioDifiere,
     TOLERANCIA_FUTURO_MS,
     MAXIMO_ATRASO_MS,
+    MAXIMO_ATRASO_IMPORTACION_MS,
     PRECIO_MAXIMO,
 };

@@ -5,7 +5,10 @@ const { Order, OrderItem, OrderPayment, Product, Customer, Table, ProductRecipe,
 const { authenticate } = require('../middleware/auth');
 const { autorizarAccionPrivilegiada } = require('../utils/verifyPin');
 const { resolverBranchId, BranchError } = require('../utils/branch');
-const { resolverFechaVenta, resolverPrecioUnitario, precioDifiere } = require('../utils/ventaOffline');
+const {
+    resolverFechaVenta, resolverPrecioUnitario, precioDifiere,
+    MAXIMO_ATRASO_IMPORTACION_MS,
+} = require('../utils/ventaOffline');
 const { desglosar, baseParaRecalcular, resolverImpuestoVenta, configImpuestoNegocio } = require('../utils/impuestos');
 const { resolverPropina, configPropinasNegocio } = require('../utils/propinas');
 const { resolverPagos } = require('../utils/pagos');
@@ -525,7 +528,7 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
             table_id, guests, discount_amount, discount_id,
             employee_id: disc_employee_id, pin: disc_pin, role: disc_role,
             loyalty_points_used, loyalty_points_earned, loyalty_discount_amount,
-            skip_stock_check, client_uuid, sold_at,
+            skip_stock_check, client_uuid, sold_at, import_historico,
             tip_amount, tip_method,
             payments,
         } = req.body;
@@ -536,7 +539,21 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
         // respetan la hora y los precios que declara el cliente: son los que el
         // negocio realmente cobró. Una venta online normal sigue igual que antes
         // (hora y precios del servidor). Ver utils/ventaOffline.js.
-        const { fecha: fechaVenta, motivo: motivoFecha } = resolverFechaVenta(sold_at);
+        // IMPORTACIÓN DE HISTORIAL (BLOQUE 18, Etapa 3): un negocio que venía
+        // usando la app SIN CUENTA sube sus meses de ventas al crear su cuenta.
+        // Solo el DUEÑO puede pedirlo, y se comprueba contra el dato que resuelve
+        // `authenticate` desde la BD —para un dueño, `business_id` ES su propio id
+        // (§14)—, no contra un `role` del token, que es lo que un cliente controla.
+        //
+        // Al resto del mundo no le cambia nada: sin la marca, la ventana sigue
+        // siendo la de 30 días que protege al POS del §38.6.
+        const esDuenoDelNegocio = Boolean(req.user && req.user.id && req.user.id === req.user.business_id);
+        const importandoHistorial = Boolean(import_historico) && esDuenoDelNegocio;
+        const { fecha: fechaVenta, motivo: motivoFecha } = resolverFechaVenta(
+            sold_at,
+            new Date(),
+            importandoHistorial ? { atrasoMaximoMs: MAXIMO_ATRASO_IMPORTACION_MS } : {}
+        );
         const esVentaDiferida = Boolean(client_uuid && fechaVenta);
         if (sold_at && !fechaVenta) {
             // Nunca se rechaza la venta por esto: se registra con la hora del
