@@ -28,6 +28,26 @@ const Ingredient = sequelize.define('Ingredient', {
         type: DataTypes.DECIMAL(10, 2),
         defaultValue: 0
     },
+    // CONTENIDO DEL PAQUETE (§45). Un insumo guardado en 'bolsas' con
+    // `content_amount: 50, content_unit: 'g'` significa "una bolsa trae 50 g", y
+    // es lo que permite que una receta escrita en gramos consuma la fracción de
+    // bolsa que le toca en vez de una bolsa entera por gramo.
+    //
+    // ⚠️ El desktop MANDABA estos dos campos desde siempre (`content_amount` /
+    // `content_unit` en `pos/modulo-inventario.js`) y aquí no estaban declarados,
+    // así que Sequelize los descartaba EN SILENCIO: el usuario rellenaba el campo,
+    // la app lo enviaba y no se guardaba nada. Es la trampa del §25 por tercera
+    // vez —tras `users.refresh_token_hash` y el costo que solo se podía capturar
+    // desde el mobile (§33.7)—. Si agregas una columna por SQL, decláralas TAMBIÉN
+    // aquí o los `update()` sobre ella no harán nada.
+    content_amount: {
+        type: DataTypes.DECIMAL(10, 3),
+        allowNull: true
+    },
+    content_unit: {
+        type: DataTypes.STRING,
+        allowNull: true
+    },
     notes: {
         type: DataTypes.TEXT,
         allowNull: true

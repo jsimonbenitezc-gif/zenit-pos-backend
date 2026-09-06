@@ -37,7 +37,7 @@ const {
     Product, ProductRecipe, Ingredient, Preparation, PreparationItem,
     ModifierOptionRecipe,
 } = require('../models');
-const { convertirCantidad } = require('./unidades');
+const { convertirParaInsumo } = require('./unidades');
 const { fraccionDeTanda } = require('./preparaciones');
 
 /** Redondeo a centavos. Los costos se acumulan con muchos decimales. */
@@ -59,7 +59,10 @@ function _costoDeLinea(linea, ctx) {
         // cero, es un costo que no se puede calcular.
         if (!ing) return { costo: 0, faltantes: ['(insumo eliminado)'] };
         const costoUnidad = parseFloat(ing.cost_per_unit) || 0;
-        const cant = convertirCantidad(cantidad, linea.unit_recipe, ing.unit);
+        // El INSUMO entero, no su unidad: si el costo convirtiera distinto que el
+        // descuento de inventario, el reporte dejaría de cuadrar con lo que salió de
+        // la bodega — el mismo criterio del rinde en el §34.
+        const cant = convertirParaInsumo(cantidad, linea.unit_recipe, ing);
         return {
             costo: cant * costoUnidad,
             faltantes: costoUnidad > 0 ? [] : [ing.name],
@@ -107,7 +110,11 @@ async function mapaDeCostos(businessId) {
     const ingredientes = new Map();
     const ings = await Ingredient.findAll({
         where: { business_id: businessId },
-        attributes: ['id', 'name', 'unit', 'cost_per_unit'],
+        // ⚠️ `content_amount` y `content_unit` TIENEN que estar en la lista: sin
+        // ellas la conversión no ve el contenido del paquete y el costo de un
+        // insumo comprado en bolsas sale 50 veces inflado. Es la trampa del §43
+        // (listar attributes a mano y olvidar el que luego se usa).
+        attributes: ['id', 'name', 'unit', 'cost_per_unit', 'content_amount', 'content_unit'],
         raw: true,
     });
     for (const i of ings) ingredientes.set(Number(i.id), i);

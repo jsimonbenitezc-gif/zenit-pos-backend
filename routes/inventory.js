@@ -21,7 +21,7 @@ const { notificarAudit } = require('./audit');
 const { enviarNotificacion } = require('../utils/push');
 const { evaluarHorario, avisarFueraDeHorario } = require('../utils/horarios');
 const { paginate, paginatedResponse } = require('../utils/pagination');
-const { convertirCantidad } = require('../utils/unidades');
+const { convertirParaInsumo, normalizarContenido } = require('../utils/unidades');
 const { fraccionDeTanda } = require('../utils/preparaciones');
 
 // El stock por sucursal se lee y se escribe SOLO por utils/branchStock.js
@@ -35,7 +35,11 @@ const {
 // La tabla de conversión vive en utils/unidades.js (BLOQUE 12): estaba duplicada
 // aquí y en routes/orders.js. Si las dos copias se desviaban, el sistema
 // descontaba una cantidad del inventario y costeaba otra.
-const convertUnit = convertirCantidad;
+// ⚠️ Recibe el INSUMO entero, no su unidad (§45): el contenido del paquete —lo
+// único que sabe que una bolsa trae 50 g— vive en el ingrediente. Con solo la
+// unidad, una receta en gramos contra un insumo en bolsas consumía una bolsa por
+// gramo, y la disponibilidad y el costo de las preparaciones salían igual de mal.
+const convertUnit = convertirParaInsumo;
 
 // ── SSE: notificaciones en tiempo real de cambios en inventario ────────────────
 const _invClients = new Map(); // businessId (string) → Set<Response>
@@ -121,7 +125,7 @@ router.get('/products-stock', authenticate, async (req, res) => {
                 if (item.item_type === 'ingredient') {
                     const ing = ingMap[item.item_id];
                     if (!ing) continue;
-                    const needed = convertUnit(parseFloat(item.quantity), item.unit_recipe, ing.unit);
+                    const needed = convertUnit(parseFloat(item.quantity), item.unit_recipe, ing);
                     if (needed <= 0) continue;
                     const possible = Math.floor(getStock(ing) / needed);
                     if (possible < min) min = possible;
@@ -132,7 +136,7 @@ router.get('/products-stock', authenticate, async (req, res) => {
                     const qtyPrep = fraccionDeTanda(item.quantity, prepYieldMap[item.item_id]);
                     for (const pi of pItems) {
                         if (!pi.ingredient) continue;
-                        const needed = convertUnit(parseFloat(pi.quantity), pi.unit_recipe, pi.ingredient.unit) * qtyPrep;
+                        const needed = convertUnit(parseFloat(pi.quantity), pi.unit_recipe, pi.ingredient) * qtyPrep;
                         if (needed <= 0) continue;
                         const possible = Math.floor(getStock(pi.ingredient) / needed);
                         if (possible < min) min = possible;
@@ -212,13 +216,19 @@ router.get('/ingredients/:id', authenticate, async (req, res) => {
 router.post('/ingredients', authenticate, isOwner, async (req, res) => {
     try {
         const biz = req.user.business_id;
-        const { name, unit, stock, min_stock, cost_per_unit, notes } = req.body;
+        const { name, unit, stock, min_stock, cost_per_unit, notes,
+                content_amount, content_unit } = req.body;
         if (!name || !unit) {
             return res.status(400).json({ error: 'Nombre y unidad son requeridos' });
         }
+        // Contenido del paquete (§45). El desktop lo mandaba desde siempre y aquí
+        // se descartaba en silencio. `normalizarContenido` deja en NULL lo que no
+        // sirve, en vez de guardar un 0 entre el que después se dividiría.
+        const contenido = normalizarContenido(content_amount, content_unit, unit);
         const ingredient = await Ingredient.create({
             name, unit, stock: stock || 0, min_stock: min_stock || 0,
-            cost_per_unit: cost_per_unit || 0, notes, business_id: biz
+            cost_per_unit: cost_per_unit || 0, notes, business_id: biz,
+            content_amount: contenido.cantidad, content_unit: contenido.unidad
         });
         res.status(201).json(ingredient);
     } catch (error) {
@@ -233,7 +243,14 @@ router.put('/ingredients/:id', authenticate, isOwner, async (req, res) => {
         if (!ingredient) {
             return res.status(404).json({ error: 'Insumo no encontrado' });
         }
-        const { name, unit, stock, min_stock, cost_per_unit, notes, active } = req.body;
+        const { name, unit, stock, min_stock, cost_per_unit, notes, active,
+                content_amount, content_unit } = req.body;
+        // La unidad de destino es la NUEVA si viene en el body: un contenido
+        // declarado en la misma unidad del insumo no significa nada y se descarta.
+        const contenido = normalizarContenido(
+            content_amount, content_unit,
+            unit !== undefined ? unit : ingredient.unit
+        );
         await ingredient.update({
             name: name !== undefined ? name : ingredient.name,
             unit: unit !== undefined ? unit : ingredient.unit,
@@ -241,7 +258,9 @@ router.put('/ingredients/:id', authenticate, isOwner, async (req, res) => {
             min_stock: min_stock !== undefined ? min_stock : ingredient.min_stock,
             cost_per_unit: cost_per_unit !== undefined ? cost_per_unit : ingredient.cost_per_unit,
             notes: notes !== undefined ? notes : ingredient.notes,
-            active: active !== undefined ? active : ingredient.active
+            active: active !== undefined ? active : ingredient.active,
+            content_amount: content_amount !== undefined ? contenido.cantidad : ingredient.content_amount,
+            content_unit:   content_unit   !== undefined ? contenido.unidad   : ingredient.content_unit
         });
         res.json(ingredient);
     } catch (error) {
@@ -382,7 +401,7 @@ router.post('/preparations/:id/recipe', authenticate, isOwner, async (req, res) 
             }, { transaction: t });
             const ingredient = await Ingredient.findByPk(item.ingredient_id, { transaction: t });
             if (ingredient) {
-                const qtyConv = convertUnit(parseFloat(item.quantity), item.unit_recipe, ingredient.unit);
+                const qtyConv = convertUnit(parseFloat(item.quantity), item.unit_recipe, ingredient);
                 totalCost += parseFloat(ingredient.cost_per_unit) * qtyConv;
             }
         }

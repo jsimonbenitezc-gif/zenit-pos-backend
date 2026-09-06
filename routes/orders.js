@@ -12,7 +12,7 @@ const { resolverPagos } = require('../utils/pagos');
 const {
     resolverModificadores, catalogoModificadores, precioConModificadores, leerModificadores,
 } = require('../utils/modificadores');
-const { convertirCantidad } = require('../utils/unidades');
+const { convertirParaInsumo } = require('../utils/unidades');
 const { fraccionDeTanda } = require('../utils/preparaciones');
 const { leerStockSucursal, escribirStockSucursal } = require('../utils/branchStock');
 const { evaluarHorario, avisarFueraDeHorario } = require('../utils/horarios');
@@ -52,8 +52,13 @@ router.get('/events', (req, res) => {
 // Los factores de conversión viven en utils/unidades.js (BLOQUE 12): estaban
 // duplicados aquí y en routes/inventory.js. Este envoltorio se queda porque
 // todas las llamadas de este archivo pasan el INGREDIENTE, no su unidad.
+//
+// ⚠️ Y ese "no su unidad" era justo lo que faltaba (§45): el envoltorio TIRABA el
+// ingrediente y solo pasaba `ingrediente.unit`, así que el contenido del paquete
+// —lo único que sabe que una bolsa trae 50 g— nunca llegaba a la cuenta. Los diez
+// sitios de este archivo ya pasaban el ingrediente entero; bastaba con no tirarlo.
 function convertirUnidad(cantidad, unidadReceta, ingrediente) {
-    return convertirCantidad(cantidad, unidadReceta, ingrediente.unit);
+    return convertirParaInsumo(cantidad, unidadReceta, ingrediente);
 }
 
 // Stock por sucursal: UNA sola fuente, la tabla `branch_stocks` (deuda §12.1).

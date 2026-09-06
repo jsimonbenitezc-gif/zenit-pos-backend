@@ -363,6 +363,18 @@ const runMigrations = async () => {
         // Los pedidos ya existentes quedan con subtotal NULL a propósito: su
         // total ES lo que se cobró y nadie sabe cuánto de eso era impuesto.
         // `tax_amount` sí se rellena con 0 (DEFAULT), que es la verdad: hasta
+        // Contenido del paquete (§45). Un insumo en 'bolsas' que declara que cada
+        // bolsa trae 50 g deja de descontar una bolsa por gramo de receta.
+        // Las dos columnas nacen NULL, que es exactamente el comportamiento
+        // anterior: sin contenido declarado, la conversión cae al camino de
+        // siempre y ningún negocio existente cambia de un día para otro.
+        try {
+            await sequelize.query('ALTER TABLE ingredients ADD COLUMN IF NOT EXISTS content_amount NUMERIC(10,3)');
+            await sequelize.query('ALTER TABLE ingredients ADD COLUMN IF NOT EXISTS content_unit VARCHAR(20)');
+        } catch (err) {
+            console.error('❌ Error asegurando columnas de contenido de insumo:', err.message);
+        }
+
         // hoy no se cobraba impuesto desglosado.
         try {
             await sequelize.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS subtotal NUMERIC(10,2)');
