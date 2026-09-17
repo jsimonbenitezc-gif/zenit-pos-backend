@@ -12,8 +12,11 @@
     "migrate:status": "npx sequelize-cli db:migrate:status",
     "probar:postgres": "node pruebas-postgres/correr.js",
     "test:pg": "node pruebas-postgres/correr-jest.js",
-    "verificar": "npm test && npm run test:pg && npm run probar:postgres && npm run probar:arranque",
-    "probar:arranque": "node pruebas-postgres/probar-arranque.js"
+    "verificar": "npm test && npm run test:pg && npm run probar:postgres && npm run probar:arranque && npm run probar:respaldo",
+    "probar:arranque": "node pruebas-postgres/probar-arranque.js",
+    "respaldar": "node scripts/respaldar.js",
+    "restaurar": "node scripts/restaurar.js",
+    "probar:respaldo": "node pruebas-postgres/probar-respaldo.js"
   },
   "dependencies": {
     "@sentry/node": "^10.45.0",

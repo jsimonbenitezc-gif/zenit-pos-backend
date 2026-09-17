@@ -6,3 +6,4 @@ node_modules/
 # No son del proyecto (CLAUDE.md §21): un script suelto de marzo y ajustes locales
 test_bloque1.js
 .claude/
+respaldos/
