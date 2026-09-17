@@ -42,6 +42,7 @@ app.use('/api/turnos',     require('../routes/turnos'));
 app.use('/api/tables',     require('../routes/tables'));
 app.use('/api/kds',        require('../routes/kds'));
 app.use('/api/audit',      require('../routes/audit'));
+app.use('/api/exports',    require('../routes/exports'));
 
 app.use(manejadorDeErrores);
 

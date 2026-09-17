@@ -18,6 +18,8 @@ const {
 const { convertirParaInsumo } = require('../utils/unidades');
 const { fraccionDeTanda } = require('../utils/preparaciones');
 const { leerStockSucursal, escribirStockSucursal } = require('../utils/branchStock');
+// Existencias por unidades, para lo que se revende y no tiene receta (§19.38).
+const { validarStockDeProductos, moverStockDeProductos } = require('../utils/stockProducto');
 const { evaluarHorario, avisarFueraDeHorario } = require('../utils/horarios');
 const { Op } = require('sequelize');
 const { notificarAudit } = require('./audit');
@@ -25,12 +27,29 @@ const { enviarNotificacion, getPrefs } = require('../utils/push');
 const { notificarInventario } = require('./inventory');
 const { configurarSSE } = require('../utils/sse');
 const rateLimit = require('express-rate-limit');
+const { ipKeyGenerator } = require('express-rate-limit');
 
 // Protección: máximo 60 pedidos por minuto por IP
+// ── Freno de emergencia para crear pedidos ──────────────────────────────────
+//
+// Era 60/min POR IP, y eso son dos problemas. El primero es el del §27.2: un
+// local con tres cajas comparte una IP pública, así que se estorbaban entre
+// ellas. El segundo es peor y solo se nota el peor día: al volver el internet
+// una caja sube su cola offline de golpe —y una migración de un negocio entero
+// (§49) sube meses de historial—, así que el tope lo alcanza justo quien más
+// necesita que la subida termine. No se perdía dinero (la venta no se marca
+// como subida y se reintenta), pero el único aviso era un console.warn que el
+// usuario nunca ve.
+//
+// Ahora la cuenta es por (IP + NEGOCIO) y el tope da margen para vaciar una
+// cola sin dejar de ser un freno. ⚠️ Va DESPUÉS de authenticate, que es quien
+// pone req.user; y ipKeyGenerator es obligatorio al escribir una clave propia
+// (normaliza IPv6 a /56), o se abre un agujero — la trampa del §27.2.
 const createOrderLimiter = rateLimit({
     windowMs: 60 * 1000,
-    max: 60,
-    message: { error: 'Demasiadas solicitudes de creación de pedidos. Intenta de nuevo en un minuto.' },
+    max: 180,
+    keyGenerator: (req) => ipKeyGenerator(req.ip || '') + ':' + (req.user ? req.user.business_id : 'anon'),
+    message: { error: 'Demasiadas ventas seguidas desde este negocio. Espera un minuto: no se perdió ninguna, se reintentan solas.' },
     standardHeaders: true,
     legacyHeaders: false
 });
@@ -556,7 +575,7 @@ router.get('/:id', authenticate, async (req, res) => {
 });
 
 // POST /api/orders
-router.post('/', createOrderLimiter, authenticate, async (req, res) => {
+router.post('/', authenticate, createOrderLimiter, async (req, res) => {
     // ⚠️ LA CONFIGURACIÓN SE LEE ANTES DE ABRIR LA TRANSACCIÓN, Y NO ES ESTILO.
     //
     // Estas tres van cacheadas (60s), pero con el caché FRÍO cada una consulta la
@@ -828,6 +847,13 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
         // para que el frontend muestre el modal "¿continuar?" al usuario.
         if (!skip_stock_check) {
             const warnings = await validarStockIngredientes(resolvedItems, branchIdFinal, t);
+            // Y las existencias por unidades de lo que no tiene receta: el
+            // refresco de reventa, que no sale de ningún insumo. Va DESPUÉS de
+            // los insumos y no antes, para que el orden en que se toman los
+            // bloqueos sea siempre el mismo (insumos → productos) en todas las
+            // transacciones: dos ventas que los tomaran al revés se provocarían
+            // un deadlock, que es justo lo que costó el §50.2.
+            warnings.push(...await validarStockDeProductos(resolvedItems, t));
             if (warnings.length > 0) {
                 await t.rollback();
                 return res.status(200).json({ stock_warning: true, warnings });
@@ -1007,6 +1033,11 @@ router.post('/', createOrderLimiter, authenticate, async (req, res) => {
             // inventario, y la cebolla que no se puso vuelve a él.
             await aplicarRecetaDeModificadores(modificadores, qty, t, branchIdFinal, -1);
         }
+
+        // Y las existencias por unidades de los productos SIN receta (§19.38).
+        // Fuera del bucle a propósito: dos renglones del mismo refresco son dos
+        // unidades del mismo producto, no dos cuentas distintas.
+        await moverStockDeProductos(resolvedItems, t, -1);
 
         // PAGOS DIVIDIDOS (BLOQUE 10). Van en la MISMA transacción que la venta:
         // un pedido cuyo desglose de pagos se perdiera a medias descuadraría el
@@ -1192,6 +1223,7 @@ router.post('/:id/items', authenticate, async (req, res) => {
         // antes de abrir la transacción.
 
         let additionalTotal = 0;
+        const productosParaDescontar = [];
         for (const item of items) {
             const productId = item.product_id || item.id;
             const product = await Product.findOne({
@@ -1241,7 +1273,13 @@ router.post('/:id/items', authenticate, async (req, res) => {
 
             await descontarIngredientesDeReceta(product.id, qty, t, order.branch_id || null);
             await aplicarRecetaDeModificadores(mods.modificadores, qty, t, order.branch_id || null, -1);
+            productosParaDescontar.push({ product, qty });
         }
+
+        // Las existencias por unidades de lo que se agregó a la mesa (§19.38).
+        // Si esto no estuviera, agregar un refresco a una mesa no lo descontaría
+        // y quitarlo sí lo devolvería: la cuenta subiría sola en cada corrección.
+        await moverStockDeProductos(productosParaDescontar, t, -1);
 
         // El impuesto de la mesa se recalcula con la tasa CONGELADA del pedido,
         // no con la de hoy: si el dueño cambió el IVA a media comida, la cuenta
@@ -1317,6 +1355,8 @@ router.delete('/:id/items/:itemId', authenticate, async (req, res) => {
         await aplicarRecetaDeModificadores(
             leerModificadores(item.modifiers), qtyItem, t, order.branch_id || null, +1
         );
+        // Y las existencias por unidades, con el signo al revés (§19.38).
+        await moverStockDeProductos([{ product_id: item.product_id, qty: qtyItem }], t, +1);
 
         await item.destroy({ transaction: t });
 
@@ -1433,6 +1473,11 @@ router.put('/:id/status', authenticate, async (req, res) => {
                     leerModificadores(item.modifiers), qty, t, order.branch_id || null, +1
                 );
             }
+            // Y las existencias por unidades de los productos sin receta (§19.38).
+            await moverStockDeProductos(
+                itemsPedido.map((it) => ({ product_id: it.product_id, qty: Math.max(1, parseInt(it.quantity) || 1) })),
+                t, +1
+            );
         }
 
         // Esta es la ruta con la que los clientes COBRAN una mesa
@@ -1662,6 +1707,14 @@ router.delete('/:id', authenticate, async (req, res) => {
                 leerModificadores(item.modifiers), qty, t, order.branch_id || null, +1
             );
         }
+        // Y las existencias por unidades (§19.38). Este alias tiene que hacer
+        // exactamente lo mismo que `PUT /:id/status`, por el mismo motivo que
+        // los modificadores: si solo uno de los dos devolviera las unidades, la
+        // cuenta dependería de por cuál de las dos rutas se canceló.
+        await moverStockDeProductos(
+            order.items.map((it) => ({ product_id: it.product_id, qty: Math.max(1, parseInt(it.quantity) || 1) })),
+            t, +1
+        );
 
         await order.update({ status: 'cancelado' }, { transaction: t });
 

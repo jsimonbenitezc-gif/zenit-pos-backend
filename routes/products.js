@@ -6,6 +6,7 @@ const rateLimit = require('express-rate-limit');
 const { Op } = require('sequelize');
 const { paginate, paginatedResponse } = require('../utils/pagination');
 const logger = require('../utils/logger');
+const { normalizarStock } = require('../utils/stockProducto');
 
 // Protección: máximo 30 productos por minuto por IP
 const createProductLimiter = rateLimit({
@@ -146,7 +147,9 @@ router.post('/', createProductLimiter, authenticate, isOwner, async (req, res) =
             name,
             description,
             price,
-            stock: stock || 0,
+            // Vacío o basura → NULL (sin control). Nunca 0: un 0 dice "se acabó"
+            // y dejaría sin poder vender a todo el que no configure existencias.
+            stock: normalizarStock(stock),
             category_id,
             emoji: emoji || 'svg:package',
             image,
@@ -179,7 +182,7 @@ router.put('/:id', authenticate, isOwner, async (req, res) => {
             name: name !== undefined ? name : product.name,
             description: description !== undefined ? description : product.description,
             price: price !== undefined ? price : product.price,
-            stock: stock !== undefined ? stock : product.stock,
+            stock: stock !== undefined ? normalizarStock(stock) : product.stock,
             category_id: category_id !== undefined ? category_id : product.category_id,
             emoji: emoji !== undefined ? emoji : product.emoji,
             image: image !== undefined ? image : product.image,

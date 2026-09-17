@@ -616,6 +616,70 @@ const runMigrations = async () => {
         // negocio que aún dependiera del JSON leería mal, y hay que enterarse.
         console.error('❌ ERROR respaldando branch_stocks (revisar inventario por sucursal):', err.message);
     }
+
+    // ── EXISTENCIAS POR UNIDADES: NULL ES "SIN CONTROL" (§19.38) ────────────
+    //
+    // `products.stock` nació con DEFAULT 0 y NOT NULL, de cuando se descontaba
+    // para todo. Con la regla de hoy —receta manda; sin receta, unidades— un 0
+    // significa "se acabó" y bloquearía la venta de todo producto que nadie
+    // configuró, que es la inmensa mayoría. El default correcto es NULL.
+    //
+    // Y se limpia lo que quedó del 2026-03-20, cuando `Product.stock` se
+    // desconectó (commit bed4bcd) y los números se quedaron congelados: en la
+    // base de producción había productos CON receta marcando −20. Un negativo
+    // no es una cuenta, y el stock de un producto con receta no significa nada.
+    //
+    // Es idempotente y además sostiene el invariante: si mañana alguien le pone
+    // receta a un producto que llevaba unidades, el siguiente arranque lo deja
+    // en NULL, que es lo que la regla dice.
+    if (sequelize.getDialect() === 'postgres') {
+        try {
+            // ⚠️ EL DEFAULT DE LA COLUMNA ES LA MARCA DE "PRIMERA VEZ", y hace
+            // falta una: la limpieza de los CEROS (abajo) NO se puede repetir en
+            // cada arranque. Un producto que se agota de verdad queda en 0, y
+            // volver a limpiarlo lo dejaría en NULL — es decir, el siguiente
+            // despliegue le APAGARÍA el control de existencias en silencio.
+            // Mientras la columna conserve su `DEFAULT 0`, este despliegue es el
+            // primero; en cuanto se quita, ya no vuelve a entrar.
+            const [defCol] = await sequelize.query(
+                "SELECT column_default FROM information_schema.columns " +
+                " WHERE table_schema = 'public' AND table_name = 'products' AND column_name = 'stock'"
+            );
+            const primeraVez = defCol.length > 0 && defCol[0].column_default !== null;
+
+            await sequelize.query('ALTER TABLE products ALTER COLUMN stock DROP DEFAULT');
+            await sequelize.query('ALTER TABLE products ALTER COLUMN stock DROP NOT NULL');
+
+            // 🔴 UNA SOLA VEZ: LOS CEROS HEREDADOS, y es lo más importante de
+            // toda la migración. La columna nacía con DEFAULT 0 y el campo no
+            // hacía nada, así que TODO producto dado de alta sin tocar ese campo
+            // tiene 0. Si ese 0 se tomara ahora como "se acabó", cada negocio
+            // que ya existe vería el aviso de faltante en CADA venta de sus
+            // productos sin receta — un POS que estorba en cada cobro. Un 0 de
+            // antes significa "no lo configuré", no "no me queda"; de aquí en
+            // adelante, un 0 tecleado a propósito sí dice que se acabó, y por
+            // eso esto NO puede repetirse en el siguiente despliegue.
+            if (primeraVez) {
+                const [, m0] = await sequelize.query('UPDATE products SET stock = NULL WHERE stock = 0');
+                const n0 = m0 && (m0.rowCount !== undefined ? m0.rowCount : m0.affectedRows);
+                if (n0) console.log(`✅ Existencias por unidades: ${n0} producto(s) que nunca se configuraron pasan a "sin control"`);
+            }
+
+            // Y la regla PERMANENTE, que sí corre en cada arranque porque es un
+            // invariante, no una limpieza: un negativo no es una cuenta, y el
+            // stock de un producto con receta no significa nada (lo mandan sus
+            // insumos). En cuanto no quede ninguno, afecta a 0 filas.
+            const [, meta] = await sequelize.query(
+                'UPDATE products SET stock = NULL ' +
+                ' WHERE stock IS NOT NULL ' +
+                '   AND (stock < 0 OR EXISTS (SELECT 1 FROM product_recipes r WHERE r.product_id = products.id))'
+            );
+            const limpiados = meta && (meta.rowCount !== undefined ? meta.rowCount : meta.affectedRows);
+            if (limpiados) console.log(`✅ Existencias por unidades: ${limpiados} producto(s) con receta o en negativo puestos en "sin control"`);
+        } catch (err) {
+            console.error('❌ ERROR ajustando products.stock:', err.message);
+        }
+    }
 };
 
 // Sincronizar base de datos
