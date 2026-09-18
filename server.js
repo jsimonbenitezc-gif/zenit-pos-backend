@@ -96,6 +96,17 @@ app.use('/api/billing', require('./routes/billing'));
 //  engancha sola en Sentry.init(). Solo hay que registrar el handler de errores
 //  después de las rutas — más abajo.)
 
+// El menú desde una foto (IDEA 1) necesita un cuerpo MÁS GRANDE que el límite
+// general: una foto de celular pesa de 3 a 8 MB y en base64 un tercio más, así que
+// con los 2 MB de abajo la primera foto del primer negocio habría dado un 413.
+// Va ANTES del parser general (que ya no vuelve a parsear un cuerpo leído) y
+// DESPUÉS de `authenticate`, que solo mira las cabeceras: así nadie sin sesión
+// puede obligar al servidor a leer 50 MB. Ver routes/importarMenu.js.
+app.use('/api/importar-menu',
+    require('./middleware/auth').authenticate,
+    express.json({ limit: '50mb' }),
+    require('./routes/importarMenu'));
+
 // Límite explícito del body: las fotos viajan como data-URI base64 y el default de
 // Express (100kb) las rechazaba con un 500 genérico. Ver middleware/errorHandler.js.
 app.use(express.json({ limit: LIMITE_BODY }));

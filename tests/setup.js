@@ -26,6 +26,12 @@ const { _limpiarAvisos } = require('../utils/horarios');
 // El límite del body y el manejador de errores son los MISMOS que en server.js,
 // para poder probar el mensaje de "contenido demasiado grande".
 const app = express();
+// Igual que en server.js: el menú desde una foto va ANTES del parser general,
+// con el suyo más grande y detrás de `authenticate` (IDEA 1).
+app.use('/api/importar-menu',
+    require('../middleware/auth').authenticate,
+    express.json({ limit: '50mb' }),
+    require('../routes/importarMenu'));
 app.use(express.json({ limit: LIMITE_BODY }));
 
 app.use('/api/auth',       require('../routes/auth'));
