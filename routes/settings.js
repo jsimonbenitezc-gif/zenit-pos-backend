@@ -7,6 +7,7 @@ const { User } = require('../models');
 const { authenticate } = require('../middleware/auth');
 const { verificarPinDePerfil } = require('../utils/verifyPin');
 const { configurarSSE } = require('../utils/sse');
+const { publicar } = require('../utils/sse-adapter');
 const { zonaValida, invalidarZonaNegocio } = require('../utils/tz');
 const { normalizarTasa, normalizarNombre, invalidarImpuestoNegocio, NOMBRE_MAX } = require('../utils/impuestos');
 const { normalizarSugerencias, invalidarPropinasNegocio } = require('../utils/propinas');
@@ -22,20 +23,19 @@ const pinLimiter = rateLimit({
 });
 
 // ── SSE: notificaciones en tiempo real de cambios en ajustes ──────────────────
-const _settingsClients = new Map(); // businessId (string) → Set<Response>
-
+// Las conexiones ya no viven aquí: las guarda `utils/sse-adapter.js`, que es
+// el único sitio que escribe a una conexión en vivo. Esta función conserva su
+// nombre y su firma porque la llaman otras rutas.
 function _notificarSettings(businessId) {
-    const clients = _settingsClients.get(String(businessId));
-    if (!clients || clients.size === 0) return;
-    const msg = `data: {}\n\n`;
-    for (const res of clients) {
-        if (res.writableEnded) { clients.delete(res); continue; }
-        try { res.write(msg); } catch { clients.delete(res); }
-    }
+    publicar(businessId, 'settings');
 }
 
+// El endpoint de siempre. Lo usan TODOS los binarios ya instalados, así que no
+// se toca y sus eventos siguen yendo SIN NOMBRE: el `onmessage` de un
+// EventSource solo recibe esos. Los clientes nuevos abren UNA sola conexión en
+// `GET /api/events?channels=…`, con eventos nombrados.
 router.get('/events', (req, res) => {
-    configurarSSE(_settingsClients, req, res);
+    configurarSSE(['settings'], req, res);
 });
 
 // GET /api/settings - Obtener ajustes del negocio

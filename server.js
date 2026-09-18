@@ -186,6 +186,10 @@ app.use('/api/branches', require('./routes/branches'));
 app.use('/api/tables',   require('./routes/tables'));
 app.use('/api/turnos',   require('./routes/turnos'));
 app.use('/api/audit',    require('./routes/audit'));
+// UNA sola conexión en vivo por dispositivo, con eventos nombrados. Los cinco
+// `/events` de siempre siguen montados dentro de sus rutas: ahí están todos los
+// binarios ya instalados (ver routes/events.js).
+app.use('/api/events',   require('./routes/events'));
 app.use('/api/push',     require('./routes/push'));
 app.use('/api/exports',  require('./routes/exports'));
 app.use('/api/shopping-list', require('./routes/shoppingList'));

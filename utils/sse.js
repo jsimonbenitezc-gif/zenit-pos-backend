@@ -1,22 +1,30 @@
 const jwt = require('jsonwebtoken');
 const { consumirTicket } = require('./sse-tickets');
+const adaptador = require('./sse-adapter');
 
-const MAX_CONEXIONES_SSE = 50;
 const SSE_TIMEOUT_MS = 55 * 60 * 1000; // 55 minutos
 
 /**
- * Configura una conexión SSE con protecciones contra memory leaks.
- * - Auth: Authorization header > ?ticket=UUID (un solo uso) > ?token=JWT (legacy)
- * - Timeout máximo de 55 minutos por conexión
- * - Verificación de res.writableEnded en cada heartbeat
- * - Límite de 50 conexiones simultáneas por business_id
+ * Abre una conexión SSE: autentica, la registra en el adaptador y monta las
+ * protecciones contra fugas de memoria.
  *
- * @param {Map<string, Set<Response>>} clientsMap
+ * - Auth: Authorization header > ?ticket=UUID (un solo uso) > ?token=JWT (legacy)
+ * - Tope de 50 conexiones POR CANAL y por negocio (igual que antes, ver
+ *   `utils/sse-adapter.js`: un tope único compartido le habría quitado
+ *   capacidad a los binarios ya instalados)
+ * - Timeout máximo de 55 minutos por conexión
+ * - Latido cada 25 s, comprobando `res.writableEnded`
+ *
+ * @param {string[]|string} canales  qué canales oye esta conexión
  * @param {Request} req
  * @param {Response} res
+ * @param {{nombrado?: boolean}} opciones  `nombrado` = eventos con `event: <canal>`.
+ *        Los cinco endpoints viejos lo dejan en false: el `onmessage` de un
+ *        EventSource SOLO recibe los eventos sin nombre, así que ponerles nombre
+ *        dejaría mudos a todos los equipos instalados.
  * @returns {boolean} true si la conexión se estableció
  */
-function configurarSSE(clientsMap, req, res) {
+function configurarSSE(canales, req, res, opciones = {}) {
     let businessId;
 
     const bearerToken = req.headers.authorization?.startsWith('Bearer ')
@@ -48,9 +56,17 @@ function configurarSSE(clientsMap, req, res) {
     }
 
     const biz = String(businessId);
+    const canalesPedidos = adaptador.normalizarCanales(canales);
 
-    if (!clientsMap.has(biz)) clientsMap.set(biz, new Set());
-    if (clientsMap.get(biz).size >= MAX_CONEXIONES_SSE) {
+    // Ni un canal válido: es un cliente pidiendo algo que no existe. Se le dice,
+    // en vez de dejarlo con una conexión abierta que no le va a llegar nunca.
+    if (canalesPedidos.size === 0) {
+        res.status(400).json({ error: 'Pide al menos un canal válido: ' + adaptador.CANALES.join(', ') });
+        return false;
+    }
+
+    const lleno = adaptador.canalLleno(biz, canalesPedidos);
+    if (lleno) {
         res.status(429).json({ error: 'Límite de conexiones SSE alcanzado' });
         return false;
     }
@@ -61,29 +77,24 @@ function configurarSSE(clientsMap, req, res) {
     res.setHeader('X-Accel-Buffering', 'no');
     res.flushHeaders();
 
-    const timeout = setTimeout(() => res.end(), SSE_TIMEOUT_MS);
+    const suscripcion = { res, canales: canalesPedidos, nombrado: !!opciones.nombrado };
 
-    const heartbeat = setInterval(() => {
-        if (res.writableEnded) {
-            clearInterval(heartbeat);
-            clearTimeout(timeout);
-            clientsMap.get(biz)?.delete(res);
-            return;
-        }
-        try { res.write(': ping\n\n'); } catch {
-            clearInterval(heartbeat);
-            clearTimeout(timeout);
-            clientsMap.get(biz)?.delete(res);
-        }
-    }, 25000);
-
-    clientsMap.get(biz).add(res);
-
-    req.on('close', () => {
+    const cerrar = () => {
         clearInterval(heartbeat);
         clearTimeout(timeout);
-        clientsMap.get(biz)?.delete(res);
-    });
+        adaptador.quitar(biz, suscripcion);
+    };
+
+    const timeout = setTimeout(() => { try { res.end(); } catch { /* ya cerrada */ } }, SSE_TIMEOUT_MS);
+
+    const heartbeat = setInterval(() => {
+        if (res.writableEnded) { cerrar(); return; }
+        try { res.write(': ping\n\n'); } catch { cerrar(); }
+    }, 25000);
+
+    adaptador.registrar(biz, suscripcion);
+
+    req.on('close', cerrar);
 
     return true;
 }

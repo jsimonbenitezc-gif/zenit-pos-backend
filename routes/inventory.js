@@ -17,6 +17,7 @@ const { authenticate, isOwner } = require('../middleware/auth');
 const { verifyEmployeePin, autorizarAccionPrivilegiada } = require('../utils/verifyPin');
 const { requirePremium } = require('../middleware/checkPlan');
 const { configurarSSE } = require('../utils/sse');
+const { publicar } = require('../utils/sse-adapter');
 const { notificarAudit } = require('./audit');
 const { enviarNotificacion } = require('../utils/push');
 const { evaluarHorario, avisarFueraDeHorario } = require('../utils/horarios');
@@ -42,20 +43,19 @@ const {
 const convertUnit = convertirParaInsumo;
 
 // ── SSE: notificaciones en tiempo real de cambios en inventario ────────────────
-const _invClients = new Map(); // businessId (string) → Set<Response>
-
+// Las conexiones ya no viven aquí: las guarda `utils/sse-adapter.js`, que es
+// el único sitio que escribe a una conexión en vivo. Esta función conserva su
+// nombre y su firma porque la llaman otras rutas.
 function _notificarInventario(businessId) {
-    const clients = _invClients.get(String(businessId));
-    if (!clients || clients.size === 0) return;
-    const msg = `data: {}\n\n`;
-    for (const res of clients) {
-        if (res.writableEnded) { clients.delete(res); continue; }
-        try { res.write(msg); } catch { clients.delete(res); }
-    }
+    publicar(businessId, 'inventory');
 }
 
+// El endpoint de siempre. Lo usan TODOS los binarios ya instalados, así que no
+// se toca y sus eventos siguen yendo SIN NOMBRE: el `onmessage` de un
+// EventSource solo recibe esos. Los clientes nuevos abren UNA sola conexión en
+// `GET /api/events?channels=…`, con eventos nombrados.
 router.get('/events', (req, res) => {
-    configurarSSE(_invClients, req, res);
+    configurarSSE(['inventory'], req, res);
 });
 
 // GET /api/inventory/products-stock?branch_id=X
