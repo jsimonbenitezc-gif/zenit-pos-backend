@@ -21,6 +21,8 @@
 // dice en voz alta; nada más del backend depende de ella.
 // ============================================================================
 
+const logger = require('../logger');
+
 const BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
 /** ¿Vale la pena reintentar? Solo lo que pasa solo: saturación, límite y red. */
@@ -188,8 +190,39 @@ let _lectorDePrueba;
 /** Solo las pruebas llaman a esto. `null` = "como si no hubiera clave". */
 function fijarLectorDePrueba(lector) { _lectorDePrueba = lector; }
 
+// 🔴 EL MISMO LECTOR DE MENTIRA, PERO PARA UN SERVIDOR QUE CORRE APARTE.
+//
+// `fijarLectorDePrueba` solo sirve dentro del proceso, así que no alcanza para el
+// banco de la interfaz del desktop (§46): ése arranca `node server.js` como otro
+// proceso y lo usa a clics. Sin esto, la única forma de recorrer la pantalla de
+// importar menú sería llamando a Gemini de verdad — dinero por corrida y una
+// respuesta distinta cada vez, que es lo contrario de una prueba.
+//
+// ⚠️ Es una puerta trasera, y por eso lleva cerrojo: en producción se IGNORA y se
+// grita. Un lector falso en producción le daría al negocio un menú inventado, que
+// es de los pocos errores de este sistema que el usuario no podría notar.
+function _lectorDeBanco() {
+    const crudo = process.env.MENU_LECTOR_FALSO;
+    if (!crudo) return null;
+    if (process.env.NODE_ENV === 'production') {
+        logger.error('MENU_LECTOR_FALSO está puesta en PRODUCCIÓN: se ignora. Quítala.');
+        return null;
+    }
+    let lectura;
+    try { lectura = JSON.parse(crudo); } catch { return null; }
+    if (!lectura || !Array.isArray(lectura.productos)) return null;
+    logger.warn('menú desde foto: usando el LECTOR FALSO (banco de pruebas), no Gemini');
+    return {
+        async leer() {
+            return { ok: true, lectura, uso: { tokens_entrada: 0, tokens_salida: 0, modelo: 'falso' } };
+        },
+    };
+}
+
 function obtenerLector() {
     if (_lectorDePrueba !== undefined) return _lectorDePrueba;
+    const falso = _lectorDeBanco();
+    if (falso) return falso;
     return crearLectorGoogle();
 }
 

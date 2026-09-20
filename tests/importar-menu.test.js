@@ -403,3 +403,55 @@ describe('POST /api/importar-menu/confirmar', () => {
         expect(validos).toEqual([{ nombre: 'Taco', precio: 24.5, descripcion: null, categoria_id: null, categoria_nueva: null }]);
     });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EL LECTOR FALSO DEL BANCO DE LA INTERFAZ, Y SU CERROJO
+//
+// `MENU_LECTOR_FALSO` existe para que el banco del desktop (§46) pueda recorrer
+// la pantalla de importar menú sin llamar a Gemini: sin ella, cada corrida
+// costaría dinero y devolvería algo distinto. Es una puerta trasera, así que lo
+// que de verdad se prueba aquí es que EN PRODUCCIÓN NO SE ABRE: un lector falso
+// ahí le daría al negocio un menú inventado, y es de los pocos errores que el
+// usuario no podría notar.
+// ═══════════════════════════════════════════════════════════════════════════
+describe('El lector falso del banco: solo fuera de producción', () => {
+    const envPrevio = { falso: process.env.MENU_LECTOR_FALSO, node: process.env.NODE_ENV, clave: process.env.GEMINI_API_KEY };
+
+    beforeEach(() => {
+        // `undefined` apaga el lector inyectado a mano y deja decidir a obtenerLector().
+        fijarLectorDePrueba(undefined);
+        delete process.env.GEMINI_API_KEY;   // sin clave, lo único que puede devolver es el falso
+    });
+    afterEach(() => {
+        if (envPrevio.falso === undefined) delete process.env.MENU_LECTOR_FALSO; else process.env.MENU_LECTOR_FALSO = envPrevio.falso;
+        if (envPrevio.node === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = envPrevio.node;
+        if (envPrevio.clave === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = envPrevio.clave;
+    });
+
+    const LECTURA = JSON.stringify({ productos: [{ nombre: 'Taco del banco', precio: 24.5, confianza: 'alta' }] });
+
+    test('fuera de producción SÍ lee, y devuelve lo que se le puso', async () => {
+        process.env.NODE_ENV = 'test';
+        process.env.MENU_LECTOR_FALSO = LECTURA;
+        const { obtenerLector } = require('../utils/menuFoto/lector');
+        const lector = obtenerLector();
+        expect(lector).not.toBeNull();
+        const r = await lector.leer({ texto: 'lo que sea' });
+        expect(r.ok).toBe(true);
+        expect(r.lectura.productos[0].nombre).toBe('Taco del banco');
+    });
+
+    test('🔴 en PRODUCCIÓN se ignora: sin clave, no hay lector y la ruta responde 503', async () => {
+        process.env.NODE_ENV = 'production';
+        process.env.MENU_LECTOR_FALSO = LECTURA;
+        const { obtenerLector } = require('../utils/menuFoto/lector');
+        expect(obtenerLector()).toBeNull();
+    });
+
+    test('un valor con basura no se usa (y no tumba nada)', () => {
+        process.env.NODE_ENV = 'test';
+        process.env.MENU_LECTOR_FALSO = 'esto no es json';
+        const { obtenerLector } = require('../utils/menuFoto/lector');
+        expect(obtenerLector()).toBeNull();
+    });
+});

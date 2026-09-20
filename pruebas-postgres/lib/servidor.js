@@ -59,11 +59,11 @@ function esperarSalud(puerto, intentos = 90, esperaMs = 500) {
  * @param {number} opts.puerto   puerto del API
  * @param {boolean} opts.verboso vuelca la salida del backend
  */
-async function arrancarServidor({ db, puerto, verboso = false }) {
+async function arrancarServidor({ db, puerto, verboso = false, envExtra = {} }) {
     // Carpeta vacía como cwd: sin `.env` que dotenv pueda encontrar.
     const cwdLimpio = fs.mkdtempSync(path.join(os.tmpdir(), 'zenit-srv-'));
 
-    const entorno = {
+    const entornoBase = {
         // Se parte de un entorno MÍNIMO en lugar de heredar todo: así una
         // variable DB_* que ya estuviera exportada en la terminal del
         // desarrollador (apuntando a producción) no puede colarse.
@@ -102,6 +102,12 @@ async function arrancarServidor({ db, puerto, verboso = false }) {
         // STRIPE_SECRET_KEY el módulo de facturación se queda inactivo salvo
         // `start-trial`, que es justo lo que el banco necesita para el premium.
     };
+    // Lo que un banco concreto necesite encima. Hoy lo usa el banco de la INTERFAZ
+    // del desktop (§46) para `MENU_LECTOR_FALSO`: recorrer la pantalla de importar
+    // menú sin llamar a Gemini, que cuesta dinero y no es determinista.
+    // ⚠️ El orden NO es negociable: lo de arriba va DESPUÉS, así que envExtra no
+    // puede pisar NODE_ENV ni las DB_*, que son las guardas de este banco (§38.2).
+    const entorno = { ...envExtra, ...entornoBase };
 
     const hijo = spawn(process.execPath, [path.join(RAIZ_BACKEND, 'server.js')], {
         cwd: cwdLimpio,
