@@ -21,6 +21,7 @@
 // ============================================================================
 
 const { Op } = require('sequelize');
+const { promoActiva } = require('./promos');
 
 // Un centavo de holgura: el desktop no redondea el porcentaje antes de
 // guardarlo y el servidor sí, así que pueden diferir en el último centavo.
@@ -34,11 +35,14 @@ const _r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
  * ese día y para siempre (el filtro viejo exigía las dos o ninguna, y ese
  * descuento no salía nunca como activo).
  */
-function descuentoVigente(descuento, fecha = new Date()) {
+function descuentoVigente(descuento, fecha = new Date(), tz = 'America/Mexico_City') {
     if (!descuento || !descuento.active) return false;
     const t = new Date(fecha).getTime();
     if (descuento.start_date && new Date(descuento.start_date).getTime() > t) return false;
     if (descuento.end_date && new Date(descuento.end_date).getTime() < t) return false;
+    // "10% los lunes" (PLAN_OFERTAS_V1): el mismo calendario que las promos, en
+    // la zona del NEGOCIO. Sin calendario vale siempre, como antes.
+    if (descuento.calendario && !promoActiva(descuento, tz, fecha)) return false;
     return true;
 }
 
@@ -66,9 +70,9 @@ function montoMaximo(descuento, base) {
  * Devuelve `{ ok: true }` o `{ ok: false, motivo, maximo }`, con motivo
  * 'inactivo' (desactivado o fuera de fechas) o 'excede'.
  */
-function revisarDescuento(descuento, montoPedido, base, fecha = new Date()) {
+function revisarDescuento(descuento, montoPedido, base, fecha = new Date(), tz) {
     const maximo = montoMaximo(descuento, base);
-    if (!descuentoVigente(descuento, fecha)) return { ok: false, motivo: 'inactivo', maximo };
+    if (!descuentoVigente(descuento, fecha, tz)) return { ok: false, motivo: 'inactivo', maximo };
     if (_r2(montoPedido - maximo) > TOLERANCIA) return { ok: false, motivo: 'excede', maximo };
     return { ok: true, maximo };
 }

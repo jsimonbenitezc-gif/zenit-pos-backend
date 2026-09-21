@@ -87,6 +87,9 @@ router.put('/', authenticate, async (req, res) => {
             'tax_enabled', 'tax_rate', 'tax_included', 'tax_name',
             // Propinas (BLOQUE 9): interruptor y porcentajes sugeridos del POS.
             'propinas_activas', 'propina_sugerencias',
+            // Juntar ofertas (PLAN_OFERTAS_V1 §3.4): ¿los descuentos de la cuenta
+            // alcanzan también a lo que ya está en promo? Apagado de fábrica.
+            'ofertas_acumulables',
             'puntos_activos', 'puntos_por_peso', 'puntos_bono_pedido', 'puntos_valor',
             'permisos_roles',
             'sucursal_id',
@@ -174,6 +177,15 @@ router.put('/', authenticate, async (req, res) => {
         // a diferencia de la tasa de impuesto, esto no cobra de más a nadie.
         if ('propina_sugerencias' in incoming) {
             incoming.propina_sugerencias = normalizarSugerencias(incoming.propina_sugerencias);
+        }
+
+        // Juntar ofertas cambia cuánto se le descuenta al cliente: es del DUEÑO,
+        // igual que el impuesto y las propinas (el backend lee la del owner).
+        if ('ofertas_acumulables' in incoming) {
+            if (req.user.id !== req.user.business_id) {
+                return res.status(403).json({ error: 'Solo el administrador puede decidir si las ofertas se juntan' });
+            }
+            incoming.ofertas_acumulables = incoming.ofertas_acumulables === true || incoming.ofertas_acumulables === 'true';
         }
 
         // La zona horaria se interpola en SQL (stats agrupa por fecha local), así que

@@ -38,6 +38,7 @@
 const { User } = require('../models');
 const { zonaDelNegocio, partesLocales, diaSemanaLocal } = require('./tz');
 const { enviarNotificacion } = require('./push');
+const { ventanaViva } = require('./ventanas');
 
 const DIAS = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
 const RE_HORA = /^([01]\d|2[0-3]):([0-5]\d)$/;
@@ -111,31 +112,9 @@ function dentroDeHorario(horario, tz, fecha = new Date()) {
     if (!Array.isArray(horario) || horario.length !== 7) return true;
 
     const p = partesLocales(tz, fecha);
-    const ahora = p.hour * 60 + p.minute;
-    const dow = diaSemanaLocal(tz, fecha);
-
-    // 1) La ventana de HOY.
-    const hoy = horario[dow];
-    if (hoy && !hoy.cerrado) {
-        const abre = _minutos(hoy.abre);
-        const cierra = _minutos(hoy.cierra);
-        if (abre !== null && cierra !== null) {
-            if (abre === cierra) return true;                       // 24 h
-            if (cierra > abre) { if (ahora >= abre && ahora < cierra) return true; }
-            else if (ahora >= abre) return true;                    // cruza medianoche: la parte de hoy
-        }
-    }
-
-    // 2) La ventana de AYER, si cruzaba la medianoche y todavía no ha cerrado.
-    //    Es lo que hace que la 1:30 de un bar con 18:00–02:00 sea horario normal.
-    const ayer = horario[(dow + 6) % 7];
-    if (ayer && !ayer.cerrado) {
-        const abre = _minutos(ayer.abre);
-        const cierra = _minutos(ayer.cierra);
-        if (abre !== null && cierra !== null && cierra < abre && ahora < cierra) return true;
-    }
-
-    return false;
+    // La ventana de HOY y la de AYER si cruzó la medianoche viven en
+    // utils/ventanas.js, que es lo que reusan las promociones con calendario.
+    return ventanaViva(horario, diaSemanaLocal(tz, fecha), p.hour * 60 + p.minute) !== null;
 }
 
 /** Texto corto de la ventana de hoy, para los mensajes ("09:00–18:00", "cerrado"). */

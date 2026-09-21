@@ -183,10 +183,19 @@ describe('El horario nunca impide operar', () => {
             .send({ cajero_nombre: 'Ana', fondo_inicial: 500 });
         expect(turno.status).toBe(201);
 
-        const cobro = await request(app).put(`/api/orders/${venta.body.id}/status`)
+        // Cobrar = cerrar una MESA con su forma de pago. (Antes esta prueba
+        // "cobraba" con tarjeta la venta de mostrador de arriba, que ya estaba
+        // cobrada en efectivo: desde PLAN_OFERTAS_V1 eso es un 400, a propósito.)
+        const mesa = await models.Table.create({ name: 'Nocturna', business_id: user.id });
+        const abierta = await request(app).post('/api/orders')
+            .set('Authorization', `Bearer ${token}`)
+            .send({ table_id: mesa.id, items: [{ product_id: prod.id, quantity: 1 }] });
+        expect(abierta.status).toBe(201);
+        const cobro = await request(app).put(`/api/orders/${abierta.body.id}/status`)
             .set('Authorization', `Bearer ${token}`)
             .send({ status: 'completado', payment_method: 'tarjeta' });
         expect(cobro.status).toBe(200);
+        expect(cobro.body.status).toBe('completado');
     });
 
     test('una venta fuera de horario NO genera aviso ni marca: vender no es sospechoso', async () => {

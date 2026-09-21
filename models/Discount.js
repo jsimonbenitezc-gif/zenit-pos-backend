@@ -36,6 +36,19 @@ const Discount = sequelize.define('Discount', {
         type: DataTypes.DATE,
         allowNull: true
     },
+    calendario: {
+        type: DataTypes.TEXT,
+        allowNull: true,
+        // Días y horas en que vale ("10% los lunes"), zona del negocio. NULL = siempre.
+        get() {
+            const v = this.getDataValue('calendario');
+            if (v === null || v === undefined || v === '') return null;
+            try { return JSON.parse(v); } catch { return null; }
+        },
+        set(v) {
+            this.setDataValue('calendario', v === null || v === undefined ? null : (typeof v === 'string' ? v : JSON.stringify(v)));
+        }
+    },
     active: {
         type: DataTypes.BOOLEAN,
         defaultValue: true

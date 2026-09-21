@@ -7,7 +7,7 @@ const { autorizarAccionPrivilegiada } = require('../utils/verifyPin');
 const { resolverBranchId, BranchError } = require('../utils/branch');
 const {
     resolverFechaVenta, resolverPrecioUnitario, precioDifiere,
-    MAXIMO_ATRASO_IMPORTACION_MS,
+    MAXIMO_ATRASO_IMPORTACION_MS, PRECIO_MAXIMO,
 } = require('../utils/ventaOffline');
 const { desglosar, baseParaRecalcular, resolverImpuestoVenta, configImpuestoNegocio } = require('../utils/impuestos');
 const { resolverPropina, configPropinasNegocio } = require('../utils/propinas');
@@ -22,6 +22,12 @@ const { leerStockSucursal, escribirStockSucursal } = require('../utils/branchSto
 const { validarStockDeProductos, moverStockDeProductos } = require('../utils/stockProducto');
 const { evaluarHorario, avisarFueraDeHorario } = require('../utils/horarios');
 const { revisarDescuento } = require('../utils/descuentos');
+const {
+    calendarioVigente, localEnZona, precioPromo, armarPromo, eleccionCabe, MAX_PRODUCTOS_PROMO,
+} = require('../utils/promos');
+const { cargarPromos, ofertasAcumulables } = require('../utils/promosNegocio');
+const { zonaDelNegocio } = require('../utils/tz');
+const crypto = require('crypto');
 const { Op } = require('sequelize');
 const { notificarAudit } = require('./audit');
 const { enviarNotificacion, getPrefs } = require('../utils/push');
@@ -407,6 +413,138 @@ async function procesarNotificacionesVenta(biz, resolvedItems, branchId, finalTo
     }
 }
 
+// ── PROMOS (PLAN_OFERTAS_V1, Bloque 1) ──────────────────────────────────────
+//
+// Un renglón de promo llega como { promo_id, promo_group, productos: [{
+// product_id, modifiers, notes }] } y sale como UN resolvedItem por producto
+// elegido, con su parte del precio ya repartida (utils/promos.js). A partir de
+// ahí la venta los trata como productos normales: receta, stock, impuesto.
+//
+//  - ONLINE: la promo tiene que existir, estar activa AHORA en la zona del
+//    negocio y la elección tiene que caber. Si no, 400 con un mensaje que la
+//    cajera puede resolver. El precio que mande el cliente se IGNORA.
+//  - DIFERIDA (§26): se respeta lo cobrado (`promo_price`) y NUNCA se rechaza.
+//    Lo que no cuadre —precio distinto, promo borrada, fuera de su horario a la
+//    hora REAL de la venta— se devuelve en `anomalias` para auditarlo.
+//
+// Devuelve { ok: true, items, anomalias } o { ok: false, status, error, code }.
+async function resolverRenglonPromo({
+    entrada, promos, biz, t, esVentaDiferida, fechaVenta, tz, catalogoMods, gruposUsados,
+}) {
+    const productos = Array.isArray(entrada.productos) ? entrada.productos : [];
+    if (productos.length === 0 || productos.length > MAX_PRODUCTOS_PROMO) {
+        return { ok: false, status: 400, code: 'PROMO_ELECCION_INVALIDA', error: 'La promo no trae los productos elegidos. Vuelve a armarla.' };
+    }
+
+    const promo = promos.get(parseInt(entrada.promo_id, 10)) || null;
+    const nombre = String((promo && promo.name) || entrada.promo_name || 'Promo').slice(0, 100);
+    const anomalias = [];
+
+    if (!esVentaDiferida) {
+        if (!promo || !promo.active) {
+            return { ok: false, status: 400, code: 'PROMO_NO_DISPONIBLE', error: `La promo "${nombre}" ya no existe. Quítala de la venta y vuelve a cobrar.` };
+        }
+        if (!calendarioVigente(promo.calendario, localEnZona(tz, new Date()))) {
+            return { ok: false, status: 400, code: 'PROMO_NO_DISPONIBLE', error: `La promo "${nombre}" no está disponible a esta hora. Quítala de la venta y cobra los productos sueltos.` };
+        }
+        if (promo.tipo === 'regalar_mas_barato' && !(promo.paga >= 1 && promo.paga < promo.lleva)) {
+            return { ok: false, status: 400, code: 'PROMO_NO_DISPONIBLE', error: `La promo "${nombre}" está mal configurada (cuántos lleva y cuántos paga). Revísala en Ofertas.` };
+        }
+    }
+
+    // Los productos, del negocio (igual que un renglón normal).
+    const elegidos = [];
+    for (const p of productos) {
+        const productId = p && (p.product_id || p.id);
+        const product = await Product.findOne({ where: { id: productId, business_id: biz }, transaction: t });
+        if (!product) {
+            return { ok: false, status: 404, error: `Producto ${productId} no encontrado en este negocio` };
+        }
+        const precioCatalogo = parseFloat(product.price);
+        // El precio DE LISTA con el que se reparte: en una diferida, el que el
+        // equipo tenía al cobrar; online, el del catálogo.
+        const { unitPrice: precioLista } = resolverPrecioUnitario(precioCatalogo, p.list_price, esVentaDiferida);
+        if (!Number.isFinite(precioLista) || precioLista < 0) {
+            return { ok: false, status: 400, error: `Precio inválido para el producto ${product.name || productId}` };
+        }
+        const mods = resolverModificadores({
+            seleccion: p.modifiers, productId: product.id, catalogo: catalogoMods, esVentaDiferida,
+        });
+        if (!mods.ok) return { ok: false, status: 400, error: mods.error };
+        elegidos.push({
+            product, precio: precioLista, precioCatalogo,
+            modificadores: mods.modificadores, delta: mods.delta,
+            notes: (p.notes || p.nota || '').toString(),
+        });
+    }
+
+    const cabe = Boolean(promo) && eleccionCabe(promo.huecos, elegidos.map(e => e.product));
+    if (!cabe) {
+        if (!esVentaDiferida) {
+            const lleva = promo ? promo.lleva : productos.length;
+            return { ok: false, status: 400, code: 'PROMO_ELECCION_INVALIDA', error: `Esos productos no entran en "${nombre}" (lleva ${lleva}). Vuelve a elegirlos.` };
+        }
+        anomalias.push(promo ? 'los productos no entran en la promo' : 'la promo ya no existe');
+    }
+
+    // El precio: el de la regla, salvo en una diferida, donde vale lo cobrado.
+    let precioServidor = null;
+    if (promo && cabe && !(promo.tipo === 'regalar_mas_barato' && !(promo.paga >= 1))) {
+        precioServidor = precioPromo(promo, elegidos.map(e => e.precio));
+    }
+    let precioForzado = null;
+    if (esVentaDiferida) {
+        const cobrado = parseFloat(entrada.promo_price);
+        if (Number.isFinite(cobrado) && cobrado >= 0 && cobrado <= PRECIO_MAXIMO) precioForzado = cobrado;
+        else if (precioServidor === null) precioForzado = elegidos.reduce((s, e) => s + e.precio, 0);
+        if (promo && !calendarioVigente(promo.calendario, localEnZona(tz, fechaVenta))) {
+            anomalias.push('fuera de su horario a la hora de la venta');
+        }
+        if (promo && !promo.active) anomalias.push('la promo estaba desactivada');
+        if (precioForzado !== null && precioServidor !== null && precioDifiere(precioForzado, precioServidor)) {
+            anomalias.push('precio distinto al de la promo');
+        }
+    }
+
+    const armada = armarPromo(promo || { tipo: 'precio_fijo', price: 0 }, elegidos, precioForzado);
+
+    // El grupo lo decide el servidor en última instancia: dos promos que
+    // llegaran con el mismo uuid se fundirían en una sola al quitar o dividir.
+    let grupo = typeof entrada.promo_group === 'string' ? entrada.promo_group.trim().slice(0, 36) : '';
+    if (!grupo || gruposUsados.has(grupo)) grupo = crypto.randomUUID();
+    gruposUsados.add(grupo);
+
+    const items = elegidos.map((e, i) => ({
+        product: e.product,
+        qty: 1,
+        unitPrice: armada.renglones[i].unit_price,
+        subtotal: armada.renglones[i].unit_price,
+        basePrice: armada.renglones[i].parte,
+        modificadores: e.modificadores,
+        notes: e.notes,
+        promo: { id: promo ? promo.id : (parseInt(entrada.promo_id, 10) || null), group: grupo, name: nombre, listPrice: e.precio },
+    }));
+
+    return {
+        ok: true,
+        items,
+        anomalias: anomalias.length
+            ? [{ producto: `Promo "${nombre}"`, cobrado: armada.precio, catalogo: precioServidor, motivo: anomalias.join('; ') }]
+            : [],
+    };
+}
+
+// Campos de promo de un OrderItem nuevo (todo NULL si no es promo).
+function camposPromo(promo) {
+    if (!promo) return {};
+    return { promo_id: promo.id, promo_group: promo.group, promo_name: promo.name, list_price: promo.listPrice };
+}
+
+// ¿El body trae renglones de promo? Para cargar promos y zona ANTES de la transacción.
+function idsDePromo(items) {
+    return (Array.isArray(items) ? items : []).filter(it => it && it.promo_id).map(it => it.promo_id);
+}
+
 // Carga un pedido con sus relaciones para la respuesta del POS (mismo shape
 // para la creación normal y para las respuestas idempotentes).
 // ⚠️ SIN `image`: las fotos son data-URIs base64 en columnas TEXT y engordan la
@@ -597,12 +735,19 @@ router.post('/', authenticate, createOrderLimiter, async (req, res) => {
     // la venta entera consume UNA sola conexión. Son de solo lectura y no dependen
     // de nada que se escriba dentro, de modo que el orden no cambia ninguna regla.
     const bizPrevio = req.user.business_id;
-    let catalogoMods, cfgImpuestoNegocio, cfgPropinasNegocio;
+    let catalogoMods, cfgImpuestoNegocio, cfgPropinasNegocio, promosVenta, tzNegocio, acumulables;
     try {
-        [catalogoMods, cfgImpuestoNegocio, cfgPropinasNegocio] = await Promise.all([
+        // Las promos que menciona la venta, la zona del negocio (su calendario
+        // y el de los descuentos se evalúan ahí) y el interruptor de "juntar
+        // ofertas" — mismas razones del pool que el resto (PLAN_OFERTAS_V1).
+        const idsPromo = idsDePromo(req.body && req.body.items);
+        [catalogoMods, cfgImpuestoNegocio, cfgPropinasNegocio, promosVenta, tzNegocio, acumulables] = await Promise.all([
             catalogoModificadores(bizPrevio),
             configImpuestoNegocio(bizPrevio),
             configPropinasNegocio(bizPrevio),
+            cargarPromos(bizPrevio, idsPromo),
+            zonaDelNegocio(bizPrevio),
+            idsPromo.length ? ofertasAcumulables(bizPrevio) : Promise.resolve(false),
         ]);
     } catch (error) {
         logger.error('Error al leer la configuración del negocio:', error);
@@ -773,7 +918,26 @@ router.post('/', authenticate, createOrderLimiter, async (req, res) => {
         // renglón contra él: el cliente manda qué opción eligió, nunca cuánto
         // cuesta. Ver utils/modificadores.js.
 
-        for (const item of items) {
+        const gruposUsados = new Set();
+        for (const [reqIndex, item] of (items || []).entries()) {
+            // PROMO (PLAN_OFERTAS_V1): un renglón de la pantalla, varios aquí.
+            if (item && item.promo_id) {
+                const r = await resolverRenglonPromo({
+                    entrada: item, promos: promosVenta, biz, t,
+                    esVentaDiferida, fechaVenta, tz: tzNegocio, catalogoMods, gruposUsados,
+                });
+                if (!r.ok) {
+                    await t.rollback();
+                    return res.status(r.status).json({ error: r.error, ...(r.code ? { code: r.code } : {}) });
+                }
+                for (const it of r.items) {
+                    calculatedTotal += it.subtotal;
+                    resolvedItems.push({ ...it, reqIndex });
+                }
+                preciosDistintos.push(...r.anomalias);
+                continue;
+            }
+
             const productId = item.product_id || item.id;
             const product = await Product.findOne({
                 where: { id: productId, business_id: biz },
@@ -837,6 +1001,7 @@ router.post('/', authenticate, createOrderLimiter, async (req, res) => {
                 basePrice: precioBase,
                 modificadores: mods.modificadores,
                 notes: item.notes || item.nota || '',
+                reqIndex,
             });
         }
 
@@ -876,20 +1041,34 @@ router.post('/', authenticate, createOrderLimiter, async (req, res) => {
         //  - DIFERIDA (§26): la venta ya se cobró y se entregó el ticket, así que
         //    se registra tal cual —nunca se rechaza— y queda auditada aparte.
         //    Se evalúa contra la hora REAL de la venta, no la de llegada.
+        // JUNTAR OFERTAS (PLAN_OFERTAS_V1 §3.4). Con el interruptor APAGADO —el
+        // de fábrica— el descuento de la cuenta solo alcanza a lo que NO es promo:
+        // una promo de $35 y un refresco de $20 con un 10% descuentan $2, no
+        // $5.50. Encendido, alcanza a toda la cuenta. El canje de puntos no entra
+        // aquí: es dinero que el cliente ya ganó.
+        const subtotalPromos = parseFloat(resolvedItems
+            .filter(it => it.promo).reduce((s, it) => s + it.subtotal, 0).toFixed(2));
+        const baseDescuento = acumulables
+            ? calculatedTotal
+            : parseFloat(Math.max(0, calculatedTotal - subtotalPromos).toFixed(2));
+
         let descuentoFueraDeRegla = null;
         if (descuentoConfigurado && discountAmt > 0) {
             const revision = revisarDescuento(
-                descuentoConfigurado, discountAmt, calculatedTotal,
-                esVentaDiferida ? fechaVenta : new Date()
+                descuentoConfigurado, discountAmt, baseDescuento,
+                esVentaDiferida ? fechaVenta : new Date(),
+                tzNegocio
             );
             if (!revision.ok) {
                 if (!esVentaDiferida) {
                     await t.rollback();
                     const nombre = descuentoConfigurado.name;
+                    const porPromo = subtotalPromos > 0 && !acumulables
+                        ? ' Los productos en promoción no llevan descuento.' : '';
                     return res.status(400).json({
                         error: revision.motivo === 'inactivo'
                             ? `El descuento "${nombre}" ya no está activo. Quítalo de la venta y vuelve a cobrar.`
-                            : `El descuento "${nombre}" es de $${revision.maximo.toFixed(2)} para esta venta; no se pueden aplicar $${discountAmt.toFixed(2)}.`,
+                            : `El descuento "${nombre}" es de $${revision.maximo.toFixed(2)} para esta venta; no se pueden aplicar $${discountAmt.toFixed(2)}.${porPromo}`,
                         code: 'DESCUENTO_FUERA_DE_REGLA',
                     });
                 }
@@ -1034,6 +1213,9 @@ router.post('/', authenticate, createOrderLimiter, async (req, res) => {
             guests: guests ? parseInt(guests) : null,
             created_by: req.user.id,
             client_uuid: client_uuid || null,
+            // Una venta de mostrador se cobra en el acto (a su hora real, si es
+            // diferida). Una mesa se abre SIN cobrar: la cobra PUT /:id/status.
+            paid_at: table_id ? null : (esVentaDiferida ? fechaVenta : new Date()),
             // Hora REAL de la venta. Sequelize solo pone `now` en createdAt si no
             // viene un valor; `updatedAt` sí queda con la hora del servidor, así
             // que el par (createdAt, updatedAt) deja ver cuándo se vendió y cuándo
@@ -1045,9 +1227,12 @@ router.post('/', authenticate, createOrderLimiter, async (req, res) => {
 
         // Se guardan los items creados en orden para poder traducir los
         // `item_indexes` de una división POR ITEMS a ids reales (ver utils/pagos.js).
-        const itemsCreados = [];
-        for (const { product, qty, unitPrice, subtotal, basePrice, modificadores, notes: itemNotes } of resolvedItems) {
+        // Un renglón de promo se vuelve VARIOS OrderItem, así que un índice del
+        // body puede apuntar a varios ids: todos los de esa promo.
+        const idsPorRenglon = new Map();
+        for (const { product, qty, unitPrice, subtotal, basePrice, modificadores, notes: itemNotes, promo, reqIndex } of resolvedItems) {
             const itemCreado = await OrderItem.create({
+                ...camposPromo(promo),
                 order_id: order.id,
                 product_id: product.id,
                 quantity: qty,
@@ -1060,7 +1245,8 @@ router.post('/', authenticate, createOrderLimiter, async (req, res) => {
                 base_unit_price: basePrice,
                 modifiers: modificadores.length ? JSON.stringify(modificadores) : null,
             }, { transaction: t });
-            itemsCreados.push(itemCreado);
+            if (!idsPorRenglon.has(reqIndex)) idsPorRenglon.set(reqIndex, []);
+            idsPorRenglon.get(reqIndex).push(itemCreado.id);
 
             // Descontar insumos según la receta del producto (si tiene receta)
             await descontarIngredientesDeReceta(product.id, qty, t, branchIdFinal);
@@ -1082,9 +1268,7 @@ router.post('/', authenticate, createOrderLimiter, async (req, res) => {
                 // `item_indexes` son posiciones del array `items` de esta misma
                 // petición; se traducen ahora que los items ya tienen id.
                 const idsPorIndice = pago.item_indexes
-                    .map(i => itemsCreados[i])
-                    .filter(Boolean)
-                    .map(it => it.id);
+                    .flatMap(i => idsPorRenglon.get(i) || []);
 
                 await OrderPayment.create({
                     order_id: order.id,
@@ -1227,9 +1411,13 @@ router.post('/:id/items', authenticate, async (req, res) => {
     // El catálogo de modificadores, ANTES de la transacción: con el caché frío
     // pide sus propias conexiones y hacerlo con la transacción abierta agota el
     // pool. Ver la nota larga en POST / (arriba).
-    let catalogoMods;
+    let catalogoMods, promosMesa, tzNegocio;
     try {
-        catalogoMods = await catalogoModificadores(req.user.business_id);
+        [catalogoMods, promosMesa, tzNegocio] = await Promise.all([
+            catalogoModificadores(req.user.business_id),
+            cargarPromos(req.user.business_id, idsDePromo(req.body && req.body.items)),
+            zonaDelNegocio(req.user.business_id),
+        ]);
     } catch (error) {
         logger.error('Error al leer el catálogo de modificadores:', error);
         return res.status(500).json({ error: 'Error interno del servidor' });
@@ -1282,7 +1470,45 @@ router.post('/:id/items', authenticate, async (req, res) => {
 
         let additionalTotal = 0;
         const productosParaDescontar = [];
+        // Los grupos de promo que la mesa ya tiene: uno nuevo no puede repetirlos,
+        // o al quitar la promo se llevaría también la de antes.
+        const gruposUsados = new Set((await OrderItem.findAll({
+            where: { order_id: order.id, promo_group: { [Op.ne]: null } },
+            attributes: ['promo_group'], transaction: t,
+        })).map(it => it.promo_group));
         for (const item of items) {
+            // PROMO (PLAN_OFERTAS_V1). Agregar a una mesa siempre ocurre en línea:
+            // la promo tiene que estar activa AHORA.
+            if (item && item.promo_id) {
+                const r = await resolverRenglonPromo({
+                    entrada: item, promos: promosMesa, biz, t,
+                    esVentaDiferida: false, fechaVenta: null, tz: tzNegocio, catalogoMods, gruposUsados,
+                });
+                if (!r.ok) {
+                    await t.rollback();
+                    return res.status(r.status).json({ error: r.error, ...(r.code ? { code: r.code } : {}) });
+                }
+                for (const it of r.items) {
+                    additionalTotal += it.subtotal;
+                    await OrderItem.create({
+                        order_id: order.id,
+                        product_id: it.product.id,
+                        quantity: 1,
+                        unit_price: it.unitPrice,
+                        subtotal: it.subtotal,
+                        notes: it.notes,
+                        client_uuid: client_uuid || null,
+                        base_unit_price: it.basePrice,
+                        modifiers: it.modificadores.length ? JSON.stringify(it.modificadores) : null,
+                        ...camposPromo(it.promo),
+                    }, { transaction: t });
+                    await descontarIngredientesDeReceta(it.product.id, 1, t, order.branch_id || null);
+                    await aplicarRecetaDeModificadores(it.modificadores, 1, t, order.branch_id || null, -1);
+                    productosParaDescontar.push({ product: it.product, qty: 1 });
+                }
+                continue;
+            }
+
             const productId = item.product_id || item.id;
             const product = await Product.findOne({
                 where: { id: productId, business_id: biz },
@@ -1405,21 +1631,44 @@ router.delete('/:id/items/:itemId', authenticate, async (req, res) => {
         // solo renglón. Solo se llega aquí con el pedido en 'registrado' —lo
         // filtra la consulta de arriba—, que es la misma condición bajo la que
         // se restaura al cancelar: el plato aún no se elaboró.
-        const qtyItem = Math.max(1, parseInt(item.quantity) || 1);
-        await restaurarIngredientesDeReceta(item.product_id, qtyItem, t, order.branch_id || null);
-        // Y el ajuste de los modificadores (§32.6), con el signo invertido: el
-        // queso extra vuelve al inventario y la cebolla que se había devuelto
-        // vuelve a salir.
-        await aplicarRecetaDeModificadores(
-            leerModificadores(item.modifiers), qtyItem, t, order.branch_id || null, +1
-        );
+        //
+        // 🔴 UNA PROMO SE QUITA ENTERA (PLAN_OFERTAS_V1, trampa 4). Cada taco de un
+        // 2x1 lleva su parte del precio: quitar uno solo dejaría "medio 2x1"
+        // cobrado a precio de promo — un taco de $14.58 que nunca existió en el
+        // menú. Se quitan todos los renglones del grupo, con sus insumos de vuelta.
+        const aQuitar = item.promo_group
+            ? await OrderItem.findAll({
+                where: { order_id: order.id, promo_group: item.promo_group },
+                order: [['id', 'ASC']],
+                transaction: t,
+            })
+            : [item];
+
+        let qtyItem = 0;
+        let importeQuitado = 0;
+        for (const it of aQuitar) {
+            const qty = Math.max(1, parseInt(it.quantity) || 1);
+            qtyItem += qty;
+            importeQuitado += parseFloat(it.subtotal);
+            await restaurarIngredientesDeReceta(it.product_id, qty, t, order.branch_id || null);
+            // Y el ajuste de los modificadores (§32.6), con el signo invertido: el
+            // queso extra vuelve al inventario y la cebolla que se había devuelto
+            // vuelve a salir.
+            await aplicarRecetaDeModificadores(
+                leerModificadores(it.modifiers), qty, t, order.branch_id || null, +1
+            );
+        }
         // Y las existencias por unidades, con el signo al revés (§19.38).
-        await moverStockDeProductos([{ product_id: item.product_id, qty: qtyItem }], t, +1);
+        await moverStockDeProductos(
+            aQuitar.map(it => ({ product_id: it.product_id, qty: Math.max(1, parseInt(it.quantity) || 1) })),
+            t, +1
+        );
+        importeQuitado = parseFloat(importeQuitado.toFixed(2));
 
         const totalAntes = order.total;
-        await item.destroy({ transaction: t });
+        for (const it of aQuitar) await it.destroy({ transaction: t });
 
-        const baseRestante = Math.max(0, parseFloat((baseParaRecalcular(order) - parseFloat(item.subtotal)).toFixed(2)));
+        const baseRestante = Math.max(0, parseFloat((baseParaRecalcular(order) - importeQuitado).toFixed(2)));
         const desgloseMesa = desglosar({
             base: baseRestante,
             tasa: order.tax_rate,
@@ -1439,7 +1688,14 @@ router.delete('/:id/items/:itemId', authenticate, async (req, res) => {
         // captura es lo normal en una mesa y no debe costarle un paso a nadie;
         // lo que importa es que quede escrito. Si los datos enseñan abuso, el PIN
         // se agrega después.
-        const producto = await Product.findByPk(item.product_id, { attributes: ['name'], transaction: t });
+        const productosQuitados = await Product.findAll({
+            where: { id: { [Op.in]: [...new Set(aQuitar.map(it => it.product_id))] } },
+            attributes: ['id', 'name'], transaction: t,
+        });
+        const nombreDe = (id) => (productosQuitados.find(p => p.id === id) || {}).name || `Producto ${id}`;
+        const descripcionQuitado = item.promo_group
+            ? `${item.promo_name || 'Promo'} (${aQuitar.map(it => nombreDe(it.product_id)).join(', ')})`
+            : nombreDe(item.product_id);
         const nombreEnPuesto = typeof req.body?.employee_name === 'string'
             ? req.body.employee_name.trim().slice(0, 100) : '';
         const cuenta = await User.findByPk(req.user.id, { attributes: ['name'], transaction: t });
@@ -1452,9 +1708,9 @@ router.delete('/:id/items/:itemId', authenticate, async (req, res) => {
             action_type: 'remove_item',
             target_description: `Pedido #${order.id}`,
             before_data: JSON.stringify({
-                producto: producto?.name || `Producto ${item.product_id}`,
+                producto: descripcionQuitado,
                 cantidad: qtyItem,
-                importe: parseFloat(item.subtotal),
+                importe: importeQuitado,
                 total_antes: parseFloat(totalAntes),
             }),
             after_data: JSON.stringify({ total: desgloseMesa.total }),
@@ -1522,6 +1778,27 @@ router.put('/:id/status', authenticate, async (req, res) => {
         if (!order) {
             await t.rollback();
             return res.status(404).json({ error: 'Pedido no encontrado' });
+        }
+
+        // ¿Esta llamada COBRA? Cobrar es mandar la forma de pago: es lo que hacen
+        // el desktop (`closeTableOrder`) y el celular (MesasScreen) al cerrar una
+        // cuenta. La cocina manda solo el estado.
+        const esCobro = status !== 'cancelado' && (
+            ['efectivo', 'tarjeta', 'transferencia'].includes(payment_method) || payments !== undefined
+        );
+
+        // 🔴 LA COCINA NO CIERRA MESAS (PLAN_OFERTAS_V1, Bloque 1). El botón
+        // "Completado" de la cocina del celular (KDSScreen) manda `completado` sin
+        // forma de pago, y esta ruta lo tomaba como el cobro: la mesa quedaba
+        // LIBRE y la venta entraba al corte como efectivo que nadie cobró. La
+        // cocina web (kds.html) lo evita a propósito; la del celular no. Se
+        // arregla aquí para que valga también en los APK ya instalados: la mesa
+        // sigue abierta y se responde 200 con el pedido tal cual.
+        if (!esCobro && ['completado', 'entregado'].includes(status)
+            && order.status === 'registrado' && order.table_id && !order.paid_at) {
+            await t.rollback();
+            const tal = await cargarPedidoConItems(order.id);
+            return res.json({ ...tal.toJSON(), mesa_sigue_abierta: true });
         }
 
         // Los items se leen en una consulta aparte, ya con el pedido bloqueado.
@@ -1607,8 +1884,9 @@ router.put('/:id/status', authenticate, async (req, res) => {
         // `item_ids` de cada pago son ids REALES de `order_items` (a diferencia
         // de una venta de mostrador, donde los items nacen en la misma petición).
         //
-        // Al cobrar se REEMPLAZA el desglose anterior: si el cajero se equivocó y
-        // vuelve a cobrar, no deben quedar los pagos viejos sumando de más.
+        // Los pagos se calculan aquí y se ESCRIBEN más abajo, después de revisar
+        // si la cuenta ya estaba cobrada.
+        let pagosNuevos = null;
         if (status !== 'cancelado' && payments !== undefined) {
             const reparto = resolverPagos({
                 payments,
@@ -1622,24 +1900,7 @@ router.put('/:id/status', authenticate, async (req, res) => {
                 return res.status(400).json({ error: reparto.error });
             }
             if (reparto.aplicar) {
-                await OrderPayment.destroy({ where: { order_id: order.id }, transaction: t });
-
-                // Solo se aceptan ids de items que de verdad son de ESTA cuenta:
-                // un id ajeno haría que el ticket dijera que alguien pagó algo que
-                // no estaba en su mesa.
-                const idsValidos = new Set(itemsPedido.map(i => i.id));
-
-                for (const pago of reparto.pagos) {
-                    await OrderPayment.create({
-                        order_id: order.id,
-                        business_id: biz,
-                        method: pago.method,
-                        amount: pago.amount,
-                        tip_amount: pago.tip_amount,
-                        item_ids: pago.item_ids.filter(id => idsValidos.has(id)),
-                    }, { transaction: t });
-                }
-
+                pagosNuevos = reparto.pagos;
                 camposCobro.payment_method = reparto.metodoResumen;
                 if (reparto.propina.monto > 0) {
                     camposCobro.tip_amount = reparto.propina.monto;
@@ -1647,6 +1908,58 @@ router.put('/:id/status', authenticate, async (req, res) => {
                 }
             }
         }
+
+        // 🔴 UNA CUENTA COBRADA NO CAMBIA DE FORMA DE PAGO (PLAN_OFERTAS_V1,
+        // Bloque 1; quedaba abierto del Bloque 0). Pasar una mesa ya cobrada de
+        // efectivo a tarjeta deja al cajero guardarse el efectivo, y el corte
+        // cuadra. El MISMO cobro repetido —un reintento por mala señal— se acepta
+        // sin tocar nada; uno distinto es 400. Antes de esta marca, "cobrar dos
+        // veces reemplazaba el desglose" (§31.9): ningún cliente lo ofrece, porque
+        // una mesa cobrada ya no se ve como abierta.
+        if (esCobro && order.paid_at) {
+            const c = (n) => Math.round((parseFloat(n) || 0) * 100);
+            let igual = true;
+            if (pagosNuevos) {
+                const previos = await OrderPayment.findAll({ where: { order_id: order.id }, transaction: t });
+                const firma = (ps) => ps.map(p => `${p.method}|${c(p.amount)}|${c(p.tip_amount)}`).sort().join(';');
+                igual = firma(previos) === firma(pagosNuevos);
+            } else if (camposCobro.payment_method && camposCobro.payment_method !== order.payment_method) {
+                igual = false;
+            }
+            if (igual && camposCobro.tip_amount !== undefined && c(camposCobro.tip_amount) !== c(order.tip_amount)) {
+                igual = false;
+            }
+            if (!igual) {
+                await t.rollback();
+                return res.status(400).json({
+                    error: 'Esta cuenta ya se cobró; su forma de pago ya no se puede cambiar.',
+                    code: 'CUENTA_YA_COBRADA',
+                });
+            }
+            // Reintento del mismo cobro: nada que reescribir.
+            pagosNuevos = null;
+            for (const k of Object.keys(camposCobro)) delete camposCobro[k];
+        }
+
+        if (pagosNuevos) {
+            await OrderPayment.destroy({ where: { order_id: order.id }, transaction: t });
+            // Solo se aceptan ids de items que de verdad son de ESTA cuenta:
+            // un id ajeno haría que el ticket dijera que alguien pagó algo que
+            // no estaba en su mesa.
+            const idsValidos = new Set(itemsPedido.map(i => i.id));
+            for (const pago of pagosNuevos) {
+                await OrderPayment.create({
+                    order_id: order.id,
+                    business_id: biz,
+                    method: pago.method,
+                    amount: pago.amount,
+                    tip_amount: pago.tip_amount,
+                    item_ids: pago.item_ids.filter(id => idsValidos.has(id)),
+                }, { transaction: t });
+            }
+        }
+
+        if (esCobro && !order.paid_at) camposCobro.paid_at = new Date();
 
         await order.update({ status, ...camposCobro }, { transaction: t });
 
@@ -1724,6 +2037,15 @@ router.put('/:id', authenticate, async (req, res) => {
             const permitidas = transicionesValidas[order.status] || [];
             if (!permitidas.includes(status)) {
                 return res.status(400).json({ error: `No se puede cambiar de "${order.status}" a "${status}"` });
+            }
+            // Una mesa sin cobrar solo se cierra COBRÁNDOLA (PUT /:id/status con
+            // la forma de pago). Cerrarla aquí la dejaría libre y en el corte
+            // como efectivo que nadie cobró.
+            if (order.table_id && !order.paid_at) {
+                return res.status(400).json({
+                    error: 'Una mesa se cierra al cobrarla.',
+                    code: 'MESA_SIN_COBRAR',
+                });
             }
         }
 

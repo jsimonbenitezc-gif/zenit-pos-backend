@@ -464,6 +464,54 @@ const runMigrations = async () => {
             console.error('❌ Error asegurando índices de modificadores:', err.message);
         }
 
+        // PROMOS CON CALENDARIO (PLAN_OFERTAS_V1, Bloque 1). `sequelize.sync()` no
+        // toca tablas que ya existen (§19.4), así que las columnas se aseguran aquí.
+        // Todas nacen NULL o con el default que reproduce lo de antes: un combo
+        // existente queda como 'precio_fijo' sin calendario (siempre), un renglón
+        // de combo viejo queda como "1 de [ese producto]", y ningún pedido cambia.
+        // Al abrir el bloque (2026-09-21) había 1 combo y 3 renglones en producción.
+        try {
+            await sequelize.query("ALTER TABLE combos ADD COLUMN IF NOT EXISTS tipo VARCHAR(20) NOT NULL DEFAULT 'precio_fijo'");
+            await sequelize.query('ALTER TABLE combos ADD COLUMN IF NOT EXISTS lleva INTEGER');
+            await sequelize.query('ALTER TABLE combos ADD COLUMN IF NOT EXISTS paga INTEGER');
+            await sequelize.query('ALTER TABLE combos ADD COLUMN IF NOT EXISTS calendario TEXT');
+            await sequelize.query('ALTER TABLE combo_items ADD COLUMN IF NOT EXISTS category_id INTEGER');
+            await sequelize.query('ALTER TABLE combo_items ADD COLUMN IF NOT EXISTS product_ids TEXT');
+            // Un hueco "2 de [Tacos]" no tiene producto fijo.
+            await sequelize.query('ALTER TABLE combo_items ALTER COLUMN product_id DROP NOT NULL');
+            await sequelize.query('ALTER TABLE discounts ADD COLUMN IF NOT EXISTS calendario TEXT');
+            await sequelize.query('ALTER TABLE order_items ADD COLUMN IF NOT EXISTS promo_id INTEGER');
+            await sequelize.query('ALTER TABLE order_items ADD COLUMN IF NOT EXISTS promo_group VARCHAR(36)');
+            await sequelize.query('ALTER TABLE order_items ADD COLUMN IF NOT EXISTS promo_name VARCHAR(100)');
+            await sequelize.query('ALTER TABLE order_items ADD COLUMN IF NOT EXISTS list_price NUMERIC(10,2)');
+
+            // CUENTA COBRADA (`orders.paid_at`). ⚠️ El relleno de lo que ya existe
+            // corre UNA SOLA VEZ, el día que nace la columna: después, una mesa
+            // cerrada sin cobrar es justo lo que la marca existe para dejar ver, y
+            // rellenarla en cada arranque la taparía. Lo que había: las ventas de
+            // mostrador y las mesas cerradas se dan por cobradas a la hora de su
+            // último cambio — no hay otra fuente, y es lo que el corte ya contó.
+            const [colPago] = await sequelize.query(
+                "SELECT 1 FROM information_schema.columns " +
+                " WHERE table_schema = 'public' AND table_name = 'orders' AND column_name = 'paid_at'"
+            );
+            if (colPago.length === 0) {
+                await sequelize.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS paid_at TIMESTAMPTZ');
+                await sequelize.query(
+                    'UPDATE orders SET paid_at = "updatedAt" ' +
+                    " WHERE status IN ('completado','entregado','devuelto') " +
+                    "    OR (table_id IS NULL AND status IN ('registrado','cancelado'))"
+                );
+            }
+            // Quitar un renglón de una promo en una mesa busca a sus hermanos.
+            await sequelize.query(
+                'CREATE INDEX IF NOT EXISTS order_items_promo_group_idx ON order_items (order_id, promo_group) WHERE promo_group IS NOT NULL'
+            );
+        } catch (err) {
+            console.error('❌ Error asegurando columnas de promociones:', err.message);
+            throw err;
+        }
+
         // Dispositivos de cocina (BLOQUE 13). `sequelize.sync()` crea la tabla si
         // no existe; aquí solo se aseguran los índices, que son los que hacen
         // barato el camino caliente: CADA petición del KDS resuelve el

@@ -125,6 +125,14 @@ const Order = sequelize.define('Order', {
     client_uuid: {
         type: DataTypes.STRING(36),
         allowNull: true
+    },
+    // CUÁNDO SE COBRÓ (PLAN_OFERTAS_V1, Bloque 1). NULL = todavía no se cobra.
+    // Hacía falta porque `completado` NO quiere decir cobrado: la cocina también
+    // marca `completado`. Una venta de mostrador nace cobrada; una mesa, al
+    // llegar su forma de pago. Una cuenta cobrada ya no cambia de forma de pago.
+    paid_at: {
+        type: DataTypes.DATE,
+        allowNull: true
     }
 }, {
     tableName: 'orders',

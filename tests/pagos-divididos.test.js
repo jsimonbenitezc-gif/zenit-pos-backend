@@ -369,21 +369,26 @@ describe('Bloque 10 — Dividir la cuenta de una mesa por items', () => {
         expect(res.body.payments[0].item_ids).toEqual([]);
     });
 
-    test('Cobrar dos veces REEMPLAZA el desglose, no lo acumula', async () => {
+    // Hasta el PLAN_OFERTAS_V1 (Bloque 1), cobrar dos veces REEMPLAZABA el
+    // desglose. Desde que el pedido sabe si ya se cobró (`paid_at`), una cuenta
+    // cobrada no cambia de forma de pago: el efectivo pasado a tarjeta se lo
+    // guarda el cajero. Lo que sigue valiendo es el REINTENTO del mismo cobro.
+    test('El mismo cobro repetido no acumula pagos; uno distinto se rechaza', async () => {
         const pedido = await abrirMesa(1);            // $100
+        const cobro = {
+            status: 'completado',
+            payments: [
+                { method: 'efectivo', amount: 50 },
+                { method: 'tarjeta', amount: 50 },
+            ],
+        };
 
-        await request(app)
-            .put(`/api/orders/${pedido.id}/status`)
-            .set(auth(ownerToken))
-            .send({
-                status: 'completado',
-                payments: [
-                    { method: 'efectivo', amount: 50 },
-                    { method: 'tarjeta', amount: 50 },
-                ],
-            });
+        await request(app).put(`/api/orders/${pedido.id}/status`).set(auth(ownerToken)).send(cobro);
+        const reintento = await request(app).put(`/api/orders/${pedido.id}/status`).set(auth(ownerToken)).send(cobro);
+        expect(reintento.status).toBe(200);
+        expect(await models.OrderPayment.count({ where: { order_id: pedido.id } })).toBe(2);
 
-        // El cajero se equivocó y vuelve a cobrar, ahora todo en efectivo.
+        // Ahora "todo en efectivo": ya no se puede.
         const res = await request(app)
             .put(`/api/orders/${pedido.id}/status`)
             .set(auth(ownerToken))
@@ -392,10 +397,9 @@ describe('Bloque 10 — Dividir la cuenta de una mesa por items', () => {
                 payments: [{ method: 'efectivo', amount: 100 }],
             });
 
-        expect(res.status).toBe(200);
-        expect(res.body.payments).toHaveLength(1);
-        expect(await models.OrderPayment.count({ where: { order_id: pedido.id } })).toBe(1);
-        expect(res.body.payment_method).toBe('efectivo');
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('CUENTA_YA_COBRADA');
+        expect(await models.OrderPayment.count({ where: { order_id: pedido.id } })).toBe(2);
     });
 
     test('Una división que no cuadra con la cuenta se rechaza', async () => {
