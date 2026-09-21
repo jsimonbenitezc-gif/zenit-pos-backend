@@ -50,6 +50,7 @@ app.use('/api/kds',        require('../routes/kds'));
 app.use('/api/audit',      require('../routes/audit'));
 app.use('/api/exports',    require('../routes/exports'));
 app.use('/api/events',     require('../routes/events'));
+app.use('/api/offers',     require('../routes/offers'));
 
 app.use(manejadorDeErrores);
 

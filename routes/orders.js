@@ -21,6 +21,7 @@ const { leerStockSucursal, escribirStockSucursal } = require('../utils/branchSto
 // Existencias por unidades, para lo que se revende y no tiene receta (§19.38).
 const { validarStockDeProductos, moverStockDeProductos } = require('../utils/stockProducto');
 const { evaluarHorario, avisarFueraDeHorario } = require('../utils/horarios');
+const { revisarDescuento } = require('../utils/descuentos');
 const { Op } = require('sequelize');
 const { notificarAudit } = require('./audit');
 const { enviarNotificacion, getPrefs } = require('../utils/push');
@@ -722,6 +723,9 @@ router.post('/', authenticate, createOrderLimiter, async (req, res) => {
         //  - descuentoEmpleado: empleado que autorizó vía PIN (si aplica), para auditoría.
         let descuentoAutorizadoPorId = false;
         let descuentoEmpleado = null;
+        // El Discount de la venta, para comprobar el MONTO una vez que se conozca
+        // el total (más abajo). Ver utils/descuentos.js.
+        let descuentoConfigurado = null;
 
         // Si viene discount_id, verificar que el descuento existe y si requiere PIN
         if (discount_id) {
@@ -734,6 +738,7 @@ router.post('/', authenticate, createOrderLimiter, async (req, res) => {
                 return res.status(404).json({ error: 'Descuento no encontrado' });
             }
             descuentoAutorizadoPorId = true;
+            descuentoConfigurado = discount;
             if (discount.requires_pin) {
                 // Mismo criterio que cancelar (§19.19): vale el PIN de PUESTO o la
                 // contraseña de CUENTA. Solo con la segunda, un descuento marcado
@@ -861,6 +866,36 @@ router.post('/', authenticate, createOrderLimiter, async (req, res) => {
         }
 
         const discountAmt = parseFloat(Math.min(Math.max(parseFloat(discount_amount) || 0, 0), calculatedTotal).toFixed(2));
+
+        // 🔴 EL MONTO DE UN DESCUENTO CONFIGURADO SE COMPRUEBA (PLAN_OFERTAS_V1,
+        // Bloque 0). Antes, el `discount_id` solo decidía si hacía falta PIN y el
+        // monto se le creía al cliente: un descuento de 5% regalaba la cuenta
+        // entera, y uno desactivado seguía sirviendo.
+        //  - ONLINE: lo que pase del máximo, o un descuento que ya no está
+        //    vigente, se RECHAZA con un error que la cajera puede resolver.
+        //  - DIFERIDA (§26): la venta ya se cobró y se entregó el ticket, así que
+        //    se registra tal cual —nunca se rechaza— y queda auditada aparte.
+        //    Se evalúa contra la hora REAL de la venta, no la de llegada.
+        let descuentoFueraDeRegla = null;
+        if (descuentoConfigurado && discountAmt > 0) {
+            const revision = revisarDescuento(
+                descuentoConfigurado, discountAmt, calculatedTotal,
+                esVentaDiferida ? fechaVenta : new Date()
+            );
+            if (!revision.ok) {
+                if (!esVentaDiferida) {
+                    await t.rollback();
+                    const nombre = descuentoConfigurado.name;
+                    return res.status(400).json({
+                        error: revision.motivo === 'inactivo'
+                            ? `El descuento "${nombre}" ya no está activo. Quítalo de la venta y vuelve a cobrar.`
+                            : `El descuento "${nombre}" es de $${revision.maximo.toFixed(2)} para esta venta; no se pueden aplicar $${discountAmt.toFixed(2)}.`,
+                        code: 'DESCUENTO_FUERA_DE_REGLA',
+                    });
+                }
+                descuentoFueraDeRegla = { motivo: revision.motivo, maximo: revision.maximo };
+            }
+        }
 
         // Seguridad de dinero: un descuento manual (sin un Discount configurado del
         // negocio) debe autorizarse con PIN de empleado. Sin esto, cualquier cajero
@@ -1108,6 +1143,29 @@ router.post('/', authenticate, createOrderLimiter, async (req, res) => {
                 after_data: JSON.stringify({ discount_amount: discountAmt, total: finalTotal, discount_id: discount_id || null }),
                 fuera_horario: marcaDescuento.fuera
             }, { transaction: t });
+
+            // Una venta DIFERIDA que llegó con un descuento mayor al configurado,
+            // o con uno que ya no estaba vigente a la hora de la venta: se
+            // registró igual (§26), pero con su propio renglón en la auditoría
+            // para que el dueño no tenga que encontrarla entre cien descuentos
+            // normales.
+            if (descuentoFueraDeRegla) {
+                await PrivilegedActionLog.create({
+                    business_id: biz,
+                    branch_id: branchIdFinal,
+                    employee_id: actorId,
+                    employee_name: actorNombre,
+                    action_type: 'discount_mismatch',
+                    target_description: `Pedido #${order.id}`,
+                    before_data: JSON.stringify({
+                        descuento: descuentoConfigurado.name,
+                        maximo_permitido: descuentoFueraDeRegla.maximo,
+                        vigente: descuentoFueraDeRegla.motivo !== 'inactivo',
+                    }),
+                    after_data: JSON.stringify({ descuento_cobrado: discountAmt, total: finalTotal }),
+                    fuera_horario: marcaDescuento.fuera
+                }, { transaction: t });
+            }
         }
 
         // Rastro de los precios que llegaron distintos al catálogo. No bloquea nada
@@ -1358,6 +1416,7 @@ router.delete('/:id/items/:itemId', authenticate, async (req, res) => {
         // Y las existencias por unidades, con el signo al revés (§19.38).
         await moverStockDeProductos([{ product_id: item.product_id, qty: qtyItem }], t, +1);
 
+        const totalAntes = order.total;
         await item.destroy({ transaction: t });
 
         const baseRestante = Math.max(0, parseFloat((baseParaRecalcular(order) - parseFloat(item.subtotal)).toFixed(2)));
@@ -1372,11 +1431,43 @@ router.delete('/:id/items/:itemId', authenticate, async (req, res) => {
             tax_amount: desgloseMesa.impuesto
         }, { transaction: t });
 
+        // 🔴 RASTRO (PLAN_OFERTAS_V1, Bloque 0). Quitar un producto de una cuenta
+        // abierta no dejaba NADA: es el robo clásico —el cliente paga 5 cervezas
+        // en efectivo, se borran 2 antes de cerrar y la diferencia se queda en la
+        // bolsa—, y ni la caja ni el inventario lo delatan, porque cuadran con lo
+        // que dice el sistema. Se audita siempre y SIN PIN: corregir un error de
+        // captura es lo normal en una mesa y no debe costarle un paso a nadie;
+        // lo que importa es que quede escrito. Si los datos enseñan abuso, el PIN
+        // se agrega después.
+        const producto = await Product.findByPk(item.product_id, { attributes: ['name'], transaction: t });
+        const nombreEnPuesto = typeof req.body?.employee_name === 'string'
+            ? req.body.employee_name.trim().slice(0, 100) : '';
+        const cuenta = await User.findByPk(req.user.id, { attributes: ['name'], transaction: t });
+        const marcaQuitar = await evaluarHorario(biz);
+        await PrivilegedActionLog.create({
+            business_id: biz,
+            branch_id: order.branch_id || null,
+            employee_id: req.user.id,
+            employee_name: nombreEnPuesto || cuenta?.name || 'Sin identificar',
+            action_type: 'remove_item',
+            target_description: `Pedido #${order.id}`,
+            before_data: JSON.stringify({
+                producto: producto?.name || `Producto ${item.product_id}`,
+                cantidad: qtyItem,
+                importe: parseFloat(item.subtotal),
+                total_antes: parseFloat(totalAntes),
+            }),
+            after_data: JSON.stringify({ total: desgloseMesa.total }),
+            fuera_horario: marcaQuitar.fuera
+        }, { transaction: t });
+
         await t.commit();
         notificarOrders(biz);
         // El stock cambió al devolver los insumos: sin este aviso, las pantallas
         // abiertas seguirían mostrando el stock de antes hasta el próximo refresco.
         notificarInventario(biz);
+        notificarAudit(biz);
+        avisarFueraDeHorario(biz, 'remove_item', marcaQuitar);
 
         res.json(await cargarPedidoConItems(order.id));
     } catch (error) {
@@ -1636,7 +1727,20 @@ router.put('/:id', authenticate, async (req, res) => {
             }
         }
 
-        await order.update({ status, payment_method, order_type, reference, delivery_address, maps_link, notes });
+        // 🔴 LA FORMA DE PAGO NO SE CAMBIA POR AQUÍ (PLAN_OFERTAS_V1, Bloque 0).
+        // Esta ruta la aceptaba sin PIN ni rastro, sobre cualquier pedido: pasar
+        // una venta de efectivo a tarjeta deja al cajero guardarse el efectivo, y
+        // el corte cuadra. Ningún cliente la usa para eso —el cobro va por
+        // PUT /:id/status, que es donde viven la propina y los pagos divididos—,
+        // así que cerrarla no rompe nada. Mandar el MISMO método sigue valiendo.
+        if (payment_method !== undefined && payment_method !== order.payment_method) {
+            return res.status(400).json({
+                error: 'La forma de pago se decide al cobrar; no se puede cambiar desde aquí.',
+                code: 'METODO_PAGO_NO_EDITABLE',
+            });
+        }
+
+        await order.update({ status, order_type, reference, delivery_address, maps_link, notes });
         res.json(order);
     } catch (error) {
         res.status(500).json({ error: 'Error interno del servidor' });

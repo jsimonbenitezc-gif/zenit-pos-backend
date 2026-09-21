@@ -4,6 +4,7 @@ const { Discount, Combo, ComboItem, Product, Category, sequelize } = require('..
 const { Op } = require('sequelize');
 const { authenticate, isOwner } = require('../middleware/auth');
 const { requirePremium } = require('../middleware/checkPlan');
+const { whereVigente } = require('../utils/descuentos');
 
 // Todas las rutas de ofertas requieren plan premium
 router.use(authenticate, requirePremium);
@@ -28,16 +29,11 @@ router.get('/discounts', authenticate, async (req, res) => {
 router.get('/discounts/active', authenticate, async (req, res) => {
     try {
         const biz = req.user.business_id;
-        const now = new Date();
+        // Cada fecha es opcional por separado (utils/descuentos.js): el filtro
+        // viejo exigía las dos o ninguna, y un descuento con solo fecha de
+        // inicio no salía nunca como activo.
         const discounts = await Discount.findAll({
-            where: {
-                active: true,
-                business_id: biz,
-                [Op.or]: [
-                    { start_date: { [Op.lte]: now }, end_date: { [Op.gte]: now } },
-                    { start_date: null, end_date: null }
-                ]
-            }
+            where: { business_id: biz, ...whereVigente(new Date()) }
         });
         res.json(discounts);
     } catch (error) {
@@ -133,25 +129,21 @@ router.post('/discounts/calculate', authenticate, async (req, res) => {
         if (!amount) {
             return res.status(400).json({ error: 'El monto es requerido' });
         }
-        const now = new Date();
-        const dateFilter = [
-            { start_date: { [Op.lte]: now }, end_date: { [Op.gte]: now } },
-            { start_date: null, end_date: null }
-        ];
+        const vigente = whereVigente(new Date());
         let discount = null;
         if (product_id) {
             discount = await Discount.findOne({
-                where: { active: true, business_id: biz, applies_to: 'product', target_id: product_id, [Op.or]: dateFilter }
+                where: { business_id: biz, ...vigente, applies_to: 'product', target_id: product_id }
             });
         }
         if (!discount && category_id) {
             discount = await Discount.findOne({
-                where: { active: true, business_id: biz, applies_to: 'category', target_id: category_id, [Op.or]: dateFilter }
+                where: { business_id: biz, ...vigente, applies_to: 'category', target_id: category_id }
             });
         }
         if (!discount) {
             discount = await Discount.findOne({
-                where: { active: true, business_id: biz, applies_to: 'all', [Op.or]: dateFilter }
+                where: { business_id: biz, ...vigente, applies_to: 'all' }
             });
         }
         if (!discount) {

@@ -235,6 +235,7 @@ const ETIQUETAS = {
     revoke_kds_device:    ['pantalla de cocina revocada', 'pantallas de cocina revocadas'],
     cash_movement:        ['movimiento de caja', 'movimientos de caja'],
     cash_movement_void:   ['anulación de caja', 'anulaciones de caja'],
+    remove_item:          ['producto quitado de una cuenta', 'productos quitados de cuentas'],
 };
 
 function _frase(tipo, n) {
