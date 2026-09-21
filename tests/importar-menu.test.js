@@ -86,6 +86,19 @@ describe('El validador: el código decide', () => {
         expect(normalizarPrecio(9999999)).toBeNull();
     });
 
+    test('🔴 "1,250" son MIL doscientos cincuenta, no $1.25', () => {
+        // Encontrado el 2026-09-21 escribiendo el importador del bot, donde el dueño
+        // TECLEA el precio ("3 1,250"). La versión anterior leía la coma siempre como
+        // decimal sin punto, y un paquete de $1,250 se habría dado de alta a $1.25.
+        expect(normalizarPrecio('1,250')).toBe(1250);
+        expect(normalizarPrecio('$1,250')).toBe(1250);
+        expect(normalizarPrecio('24,50')).toBe(24.5);      // la coma decimal sigue siendo decimal
+        expect(normalizarPrecio('1,5')).toBe(1.5);
+        expect(normalizarPrecio('1.250,50')).toBe(1250.5); // el último separador es el decimal
+        expect(normalizarPrecio('1,250.50')).toBe(1250.5);
+        expect(normalizarPrecio('24.50')).toBe(24.5);      // un solo punto es decimal (México)
+    });
+
     test('🔒 el $2450 que era $24.50 se MARCA — y no se "corrige" solo', () => {
         const p = armarPropuesta([{ productos: [
             producto('Pastor', 22), producto('Suadero', 24.5), producto('Campechano', 26),

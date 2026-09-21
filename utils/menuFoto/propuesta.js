@@ -78,9 +78,29 @@ function normalizarPrecio(valor) {
         n = valor;
     } else {
         const texto = String(valor).replace(/[^\d.,-]/g, '');
-        // "24,50" es coma decimal; "1,250.00" es separador de miles. Si hay
-        // punto, la coma es de miles; si no lo hay, la coma es el decimal.
-        n = Number(texto.includes('.') ? texto.replace(/,/g, '') : texto.replace(',', '.'));
+        // 🔴 LA COMA ES AMBIGUA, y equivocarse cuesta dinero. En México "24,50" es
+        // coma decimal, pero "1,250" son MIL doscientos cincuenta — y la versión
+        // anterior lo leía como $1.25 (2026-09-21, al escribir el importador del
+        // bot: ahí el dueño TECLEA el precio, "3 1,250"). La regla estándar:
+        //   · con coma Y punto, el ÚLTIMO es el decimal ("1,250.50", "1.250,50");
+        //   · solo comas: seguida de EXACTAMENTE 3 dígitos separa miles
+        //     ("1,250", "12,500,000"); de 1 o 2, es el decimal ("24,50");
+        //   · varios puntos son miles ("1.250.000"); uno solo, el decimal.
+        const ultimaComa = texto.lastIndexOf(',');
+        const ultimoPunto = texto.lastIndexOf('.');
+        let limpio;
+        if (ultimaComa >= 0 && ultimoPunto >= 0) {
+            limpio = ultimaComa > ultimoPunto
+                ? texto.replace(/\./g, '').replace(',', '.')
+                : texto.replace(/,/g, '');
+        } else if (ultimaComa >= 0) {
+            limpio = /^-?\d{1,3}(,\d{3})+$/.test(texto) ? texto.replace(/,/g, '') : texto.replace(',', '.');
+        } else if ((texto.match(/\./g) || []).length > 1) {
+            limpio = texto.replace(/\./g, '');
+        } else {
+            limpio = texto;
+        }
+        n = Number(limpio);
     }
     if (!Number.isFinite(n) || n <= 0 || n > PRECIO_MAXIMO) return null;
     return Math.round(n * 100) / 100;
