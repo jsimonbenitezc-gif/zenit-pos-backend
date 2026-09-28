@@ -9,7 +9,7 @@ const { filtroVentaContable } = require('../utils/ordersFilter');
 const { requirePremium } = require('../middleware/checkPlan');
 const { mapaDeCostos, costoDeModificadores, centavos } = require('../utils/costos');
 const {
-    zonaDelNegocio, inicioDiaLocal, inicioDiaLocalISO,
+    zonaDelNegocio, inicioDiaLocal, inicioDiaLocalISO, partesLocales,
     sqlFechaLocal, sqlHoraLocal, sqlMesLocal
 } = require('../utils/tz');
 const { horarioDelNegocio, ventanaDelDia } = require('../utils/horarios');
@@ -49,6 +49,10 @@ router.get('/dashboard', authenticate, async (req, res) => {
         const hoy = inicioDiaLocal(tz, ahora);
         const ayer = inicioDiaLocal(tz, ahora, -1);
         const hace7Dias = inicioDiaLocal(tz, ahora, -6);
+        // "Hoy" en el calendario del negocio (YYYY-MM-DD): la gráfica de 7 días arma sus
+        // días desde aquí, no desde el reloj del cliente (que estaba en UTC).
+        const pHoy = partesLocales(tz, ahora);
+        const hoyLocal = `${pHoy.year}-${String(pHoy.month).padStart(2, '0')}-${String(pHoy.day).padStart(2, '0')}`;
 
         // Expresiones SQL para agrupar por fecha/hora LOCAL del negocio
         const exprFechaLocal = sqlFechaLocal(sequelize, '"createdAt"', tz);
@@ -298,6 +302,7 @@ router.get('/dashboard', authenticate, async (req, res) => {
                 total_pedidos: parseInt(ventasAyer[0]?.total_pedidos) || 0
             },
             ultimos7Dias,
+            hoyLocal,
             itemsVendidosHoy: parseInt(itemsVendidosHoy[0].total_items) || 0,
             productosStockBajo,
             clientesHoy,
