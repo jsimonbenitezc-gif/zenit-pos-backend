@@ -133,6 +133,13 @@ const Order = sequelize.define('Order', {
     paid_at: {
         type: DataTypes.DATE,
         allowNull: true
+    },
+    // PARTE DE UNA MESA (PLAN_CUENTAS_V1). Una mesa cobrada por partes: cada
+    // parte es una venta propia, nacida cobrada, que apunta aquí a la mesa de la
+    // que se separó (POST /api/orders/:id/separar). NULL = pedido normal.
+    parent_order_id: {
+        type: DataTypes.INTEGER,
+        allowNull: true
     }
 }, {
     tableName: 'orders',

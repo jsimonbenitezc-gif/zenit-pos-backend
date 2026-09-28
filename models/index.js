@@ -503,6 +503,13 @@ const runMigrations = async () => {
                     "    OR (table_id IS NULL AND status IN ('registrado','cancelado'))"
                 );
             }
+            // COBRAR UNA MESA POR PARTES (PLAN_CUENTAS_V1). Cada parte cobrada es
+            // una venta aparte que apunta a la mesa de donde salió. NULL = pedido
+            // normal. Declarada también en models/Order.js (§25/§45).
+            await sequelize.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS parent_order_id INTEGER');
+            await sequelize.query(
+                'CREATE INDEX IF NOT EXISTS orders_parent_order_idx ON orders (parent_order_id) WHERE parent_order_id IS NOT NULL'
+            );
             // Quitar un renglón de una promo en una mesa busca a sus hermanos.
             await sequelize.query(
                 'CREATE INDEX IF NOT EXISTS order_items_promo_group_idx ON order_items (order_id, promo_group) WHERE promo_group IS NOT NULL'

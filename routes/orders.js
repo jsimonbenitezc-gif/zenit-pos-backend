@@ -27,6 +27,7 @@ const {
 } = require('../utils/promos');
 const { cargarPromos, ofertasAcumulables } = require('../utils/promosNegocio');
 const { zonaDelNegocio } = require('../utils/tz');
+const { partesCobradasDe } = require('../utils/partesMesa');
 const crypto = require('crypto');
 const { Op } = require('sequelize');
 const { notificarAudit } = require('./audit');
@@ -1729,6 +1730,366 @@ router.delete('/:id/items/:itemId', authenticate, async (req, res) => {
     } catch (error) {
         await t.rollback();
         logger.error('Delete order item error:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// ── COBRAR UNA MESA POR PARTES (PLAN_CUENTAS_V1) ─────────────────────────────
+//
+// Lo que responde /separar (y su reintento): la mesa como quedó, la parte
+// cobrada (con items y pagos, para imprimir su ticket) y todas las partes.
+async function respuestaSeparar(mesaId, parteId, biz) {
+    const [mesa, parte, porMesa] = await Promise.all([
+        cargarPedidoConItems(mesaId),
+        cargarPedidoConItems(parteId),
+        partesCobradasDe([mesaId], biz),
+    ]);
+    return { mesa, parte, partes: porMesa[mesaId] || [] };
+}
+
+// POST /api/orders/:id/separar
+// Body: { items: [{ item_id, quantity }], payment_method | payments, tip_amount,
+//         tip_method, employee_name, client_uuid }
+//
+// Cobra UNA PARTE de una mesa abierta: los productos elegidos salen del pedido
+// de la mesa a un pedido NUEVO que nace cobrado (`parent_order_id` = la mesa).
+// La caja, el corte, los reportes, los tickets y la cocina no cambian: ya saben
+// tratar una venta cobrada. La mesa sigue abierta con lo que queda.
+//
+// ⚠️ EL INVENTARIO NO SE TOCA. Se descontó al agregar a la mesa (POST /:id/items);
+// aquí los productos solo cambian de pedido. Descontar aquí sería descontar doble.
+router.post('/:id/separar', authenticate, async (req, res) => {
+    const biz = req.user.business_id;
+    const c = (n) => Math.round((parseFloat(n) || 0) * 100);
+    const r2 = (n) => parseFloat((Math.round((parseFloat(n) || 0) * 100) / 100).toFixed(2));
+
+    // Configuración ANTES de abrir la transacción (§50.1): con el caché frío
+    // consulta la base, y pedir esa conexión con la transacción abierta agota el pool.
+    let cfgPropinas, marcaHorario;
+    try {
+        cfgPropinas = await configPropinasNegocio(biz);
+        marcaHorario = await evaluarHorario(biz);
+    } catch (error) {
+        logger.error('Separar cuenta: error leyendo la configuración:', error);
+        return res.status(500).json({ error: 'Error interno del servidor' });
+    }
+
+    const { items, payment_method, payments, tip_amount, tip_method } = req.body || {};
+    const clientUuid = typeof req.body?.client_uuid === 'string' && req.body.client_uuid.trim()
+        ? req.body.client_uuid.trim().slice(0, 36) : null;
+
+    // Idempotencia: el mismo cobro repetido (un reintento por mala señal)
+    // devuelve lo mismo y no separa dos veces. Va ANTES de revisar la mesa: si
+    // entretanto alguien cobró el resto, el reintento igual debe ver su parte.
+    const yaHecha = async (transaction) => {
+        if (!clientUuid) return null;
+        return Order.findOne({
+            where: { client_uuid: clientUuid, business_id: biz },
+            attributes: ['id', 'parent_order_id'],
+            ...(transaction ? { transaction } : {}),
+        });
+    };
+    const responderReintento = async (previa) => {
+        if (String(previa.parent_order_id) !== String(req.params.id)) {
+            return res.status(409).json({ error: 'Ese cobro ya se registró con otra cuenta.', code: 'UUID_EN_USO' });
+        }
+        return res.json(await respuestaSeparar(previa.parent_order_id, previa.id, biz));
+    };
+    try {
+        const previa = await yaHecha();
+        if (previa) return responderReintento(previa);
+    } catch (error) {
+        logger.error('Separar cuenta: error revisando reintento:', error);
+        return res.status(500).json({ error: 'Error interno del servidor' });
+    }
+
+    if (!Array.isArray(items) || items.length === 0) {
+        return res.status(400).json({ error: 'Elige qué productos paga esta persona.' });
+    }
+    if (!['efectivo', 'tarjeta', 'transferencia'].includes(payment_method) && payments === undefined) {
+        return res.status(400).json({ error: 'Falta la forma de pago.' });
+    }
+
+    const t = await sequelize.transaction();
+    try {
+        // Bloquear la mesa. SIN include (§19.25): Postgres rechaza FOR UPDATE
+        // sobre un OUTER JOIN. Los items van en una consulta aparte.
+        const mesa = await Order.findOne({
+            where: { id: req.params.id, business_id: biz },
+            transaction: t,
+            lock: t.LOCK.UPDATE,
+        });
+        if (!mesa) {
+            await t.rollback();
+            return res.status(404).json({ error: 'Pedido no encontrado' });
+        }
+
+        // Con la mesa ya bloqueada, un reintento concurrente que llegó a la vez
+        // ve aquí la parte que el primero acaba de cobrar.
+        const previaEnLock = await yaHecha(t);
+        if (previaEnLock) {
+            await t.rollback();
+            return responderReintento(previaEnLock);
+        }
+
+        if (mesa.status !== 'registrado' || !mesa.table_id || mesa.paid_at) {
+            await t.rollback();
+            return res.status(409).json({
+                error: 'Esta cuenta ya no está abierta. Actualiza la mesa.',
+                code: 'MESA_NO_ABIERTA',
+            });
+        }
+        // Hoy ninguna mesa trae descuento (se abren y se cobran sin él). Si algún
+        // día lo trae, repartirlo tiene sus propias reglas: mejor no separar que
+        // repartirlo mal.
+        if (c(mesa.discount_amount) > 0) {
+            await t.rollback();
+            return res.status(409).json({
+                error: 'Esta cuenta tiene un descuento: cóbrala completa.',
+                code: 'MESA_CON_DESCUENTO',
+            });
+        }
+
+        const renglones = await OrderItem.findAll({
+            where: { order_id: mesa.id },
+            order: [['id', 'ASC']],
+            transaction: t,
+        });
+        const porId = new Map(renglones.map(it => [it.id, it]));
+        const qtyDe = (it) => Math.max(1, parseInt(it.quantity) || 1);
+
+        // ¿Qué sale y cuánto de cada renglón? item_id → cantidad que se separa.
+        const salen = new Map();
+        for (const pedido of items) {
+            const it = porId.get(parseInt(pedido?.item_id));
+            if (!it) {
+                await t.rollback();
+                return res.status(400).json({ error: 'Uno de los productos ya no está en esta cuenta. Actualiza la mesa.' });
+            }
+            if (salen.has(it.id)) {
+                await t.rollback();
+                return res.status(400).json({ error: 'Un producto viene repetido en la selección.' });
+            }
+            const pedidaQty = pedido.quantity === undefined || pedido.quantity === null
+                ? qtyDe(it) : parseInt(pedido.quantity);
+            if (!Number.isInteger(pedidaQty) || pedidaQty < 1 || pedidaQty > qtyDe(it)) {
+                await t.rollback();
+                return res.status(400).json({ error: 'Cantidad inválida para uno de los productos.' });
+            }
+            salen.set(it.id, pedidaQty);
+        }
+        // Una promo sale ENTERA (§61.4): medio 2x1 cobrado a precio de promo es
+        // un precio que nunca existió en el menú. Todo su grupo, completo.
+        for (const id of [...salen.keys()]) {
+            const grupo = porId.get(id).promo_group;
+            if (!grupo) continue;
+            for (const it of renglones) {
+                if (it.promo_group === grupo) salen.set(it.id, qtyDe(it));
+            }
+        }
+
+        const unidadesMesa = renglones.reduce((s, it) => s + qtyDe(it), 0);
+        const unidadesSalen = [...salen.values()].reduce((s, q) => s + q, 0);
+        if (unidadesSalen >= unidadesMesa) {
+            await t.rollback();
+            return res.status(400).json({
+                error: 'Esa es toda la cuenta: usa "Cobrar".',
+                code: 'ES_TODA_LA_CUENTA',
+            });
+        }
+
+        // La base de la parte: los subtotales de lo que sale. En una cantidad
+        // parcial, la porción del subtotal del renglón; lo que queda en la mesa es
+        // la RESTA, así que entre los dos suman el renglón al centavo.
+        const porcion = (it, q) => q === qtyDe(it)
+            ? r2(it.subtotal)
+            : r2(parseFloat(it.subtotal) * q / qtyDe(it));
+        let baseParte = 0;
+        for (const [id, q] of salen) baseParte += porcion(porId.get(id), q);
+        baseParte = r2(baseParte);
+
+        // La tasa CONGELADA de la mesa, no la de hoy: si el dueño cambió el IVA
+        // con la mesa abierta, su cuenta sigue cuadrando con lo que se le dijo.
+        const desgloseParte = desglosar({ base: baseParte, tasa: mesa.tax_rate, incluido: mesa.tax_included });
+
+        // Lo que queda en la mesa = lo de antes MENOS la parte. Así la suma de
+        // todas las partes y el resto da EXACTO el total que se le dijo a la mesa,
+        // y el centavo de redondeo del impuesto se lo queda el resto (§31.7).
+        // Un pedido anterior al impuesto (sin subtotal) se re-desglosa como
+        // DELETE /:id/items.
+        let restoMesa;
+        if (mesa.subtotal === null || mesa.subtotal === undefined) {
+            const d = desglosar({
+                base: Math.max(0, r2(baseParaRecalcular(mesa) - baseParte)),
+                tasa: mesa.tax_rate, incluido: mesa.tax_included,
+            });
+            restoMesa = { total: d.total, subtotal: d.subtotal, tax_amount: d.impuesto };
+        } else {
+            restoMesa = {
+                total:      r2(parseFloat(mesa.total) - desgloseParte.total),
+                subtotal:   r2(parseFloat(mesa.subtotal) - desgloseParte.subtotal),
+                tax_amount: r2((parseFloat(mesa.tax_amount) || 0) - desgloseParte.impuesto),
+            };
+        }
+        if (restoMesa.total < 0 || restoMesa.subtotal < 0 || restoMesa.tax_amount < 0) {
+            // Una mesa cuyos renglones no cuadran con su total: no se toca nada.
+            await t.rollback();
+            logger.error(`Separar cuenta: la mesa #${mesa.id} no cuadra (resto negativo)`, restoMesa);
+            return res.status(409).json({ error: 'Esta cuenta no cuadra; cóbrala completa.', code: 'MESA_NO_CUADRA' });
+        }
+
+        // Forma de pago de la parte: las reglas de siempre (§30, §31).
+        const camposCobro = {
+            payment_method: ['efectivo', 'tarjeta', 'transferencia'].includes(payment_method) ? payment_method : 'efectivo',
+            tip_amount: 0,
+            tip_method: null,
+        };
+        if (tip_amount !== undefined) {
+            const propina = resolverPropina({
+                config: cfgPropinas, tipAmount: tip_amount, tipMethod: tip_method,
+                paymentMethod: camposCobro.payment_method,
+            });
+            camposCobro.tip_amount = propina.monto;
+            camposCobro.tip_method = propina.metodo;
+        }
+        let pagos = null;
+        if (payments !== undefined) {
+            const reparto = resolverPagos({
+                payments,
+                total: desgloseParte.total,
+                esVentaDiferida: false,
+                propinasActivas: cfgPropinas.activo,
+                metodoPorDefecto: camposCobro.payment_method,
+            });
+            if (reparto.error) {
+                await t.rollback();
+                return res.status(400).json({ error: reparto.error });
+            }
+            if (reparto.aplicar) {
+                pagos = reparto.pagos;
+                camposCobro.payment_method = reparto.metodoResumen;
+                if (reparto.propina.monto > 0) {
+                    camposCobro.tip_amount = reparto.propina.monto;
+                    camposCobro.tip_method = reparto.propina.metodo;
+                }
+            }
+        }
+
+        const ahora = new Date();
+        const parte = await Order.create({
+            business_id: biz,
+            branch_id: mesa.branch_id,
+            table_id: mesa.table_id,
+            customer_id: mesa.customer_id,
+            order_type: mesa.order_type,
+            created_by: req.user.id,
+            parent_order_id: mesa.id,
+            total: desgloseParte.total,
+            subtotal: desgloseParte.subtotal,
+            tax_amount: desgloseParte.impuesto,
+            tax_rate: mesa.tax_rate,
+            tax_included: mesa.tax_included,
+            discount_amount: 0,
+            status: 'completado',
+            paid_at: ahora,
+            client_uuid: clientUuid,
+            ...camposCobro,
+        }, { transaction: t });
+
+        // Mover los renglones. Completo → cambia de pedido. Parcial → el de la
+        // mesa baja su cantidad y nace uno igual en la parte con lo separado.
+        const idsParte = [];
+        const descripcion = [];
+        const productos = await Product.findAll({
+            where: { id: { [Op.in]: [...new Set([...salen.keys()].map(id => porId.get(id).product_id))] } },
+            attributes: ['id', 'name'], transaction: t,
+        });
+        const nombreDe = (id) => (productos.find(p => p.id === id) || {}).name || `Producto ${id}`;
+        for (const [id, q] of salen) {
+            const it = porId.get(id);
+            descripcion.push(`${q} × ${nombreDe(it.product_id)}`);
+            if (q === qtyDe(it)) {
+                await it.update({ order_id: parte.id }, { transaction: t });
+                idsParte.push(it.id);
+                continue;
+            }
+            const sub = porcion(it, q);
+            await it.update({
+                quantity: qtyDe(it) - q,
+                subtotal: r2(parseFloat(it.subtotal) - sub),
+            }, { transaction: t });
+            const nuevo = await OrderItem.create({
+                order_id: parte.id,
+                product_id: it.product_id,
+                quantity: q,
+                unit_price: it.unit_price,
+                subtotal: sub,
+                notes: it.notes,
+                base_unit_price: it.base_unit_price,
+                modifiers: it.modifiers,
+                promo_id: it.promo_id,
+                promo_group: it.promo_group,
+                promo_name: it.promo_name,
+                list_price: it.list_price,
+            }, { transaction: t });
+            idsParte.push(nuevo.id);
+        }
+
+        if (pagos) {
+            const validos = new Set(idsParte);
+            for (const pago of pagos) {
+                await OrderPayment.create({
+                    order_id: parte.id,
+                    business_id: biz,
+                    method: pago.method,
+                    amount: pago.amount,
+                    tip_amount: pago.tip_amount,
+                    item_ids: (pago.item_ids || []).filter(id => validos.has(id)),
+                }, { transaction: t });
+            }
+        }
+
+        const totalAntes = parseFloat(mesa.total);
+        await mesa.update(restoMesa, { transaction: t });
+
+        // Rastro: quién separó qué, de qué mesa, por cuánto. Sin PIN, igual que
+        // quitar un producto: es un cobro normal, lo que importa es que quede escrito.
+        const nombreEnPuesto = typeof req.body?.employee_name === 'string'
+            ? req.body.employee_name.trim().slice(0, 100) : '';
+        const cuenta = await User.findByPk(req.user.id, { attributes: ['name'], transaction: t });
+        await PrivilegedActionLog.create({
+            business_id: biz,
+            branch_id: mesa.branch_id || null,
+            employee_id: req.user.id,
+            employee_name: nombreEnPuesto || cuenta?.name || 'Sin identificar',
+            action_type: 'separar_cuenta',
+            target_description: `Pedido #${mesa.id}`,
+            before_data: JSON.stringify({ total: totalAntes, productos: descripcion.join(', ') }),
+            after_data: JSON.stringify({
+                parte: parte.id, cobrado: desgloseParte.total,
+                metodo: camposCobro.payment_method, queda: restoMesa.total,
+            }),
+            fuera_horario: marcaHorario.fuera,
+        }, { transaction: t });
+
+        await t.commit();
+        notificarOrders(biz);
+        notificarAudit(biz);
+
+        res.status(201).json(await respuestaSeparar(mesa.id, parte.id, biz));
+    } catch (error) {
+        await t.rollback();
+        // Carrera de dos reintentos con el mismo client_uuid: el índice único
+        // frenó al segundo; se contesta con lo que guardó el primero.
+        if (error.name === 'SequelizeUniqueConstraintError' && clientUuid) {
+            try {
+                const previa = await yaHecha();
+                if (previa) return responderReintento(previa);
+            } catch (e2) {
+                logger.error('Separar cuenta: error resolviendo carrera de client_uuid:', e2);
+            }
+        }
+        logger.error('Separar cuenta error:', error);
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });

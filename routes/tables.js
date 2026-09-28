@@ -5,6 +5,7 @@ const { Table, Order, OrderItem, Product } = require('../models');
 const { authenticate, isOwner } = require('../middleware/auth');
 const { resolverBranchId, BranchError } = require('../utils/branch');
 const { Op } = require('sequelize');
+const { partesCobradasDe } = require('../utils/partesMesa');
 
 // ── GET /api/tables
 // Devuelve todas las mesas activas del negocio con su pedido abierto (si tiene).
@@ -51,10 +52,17 @@ router.get('/', authenticate, async (req, res) => {
             orderByTable[o.table_id] = o;
         }
 
-        const result = tables.map(t => ({
-            ...t.toJSON(),
-            open_order: orderByTable[t.id] || null,
-        }));
+        // "Ya pagaron" (PLAN_CUENTAS_V1): las partes cobradas de cada mesa abierta.
+        // Solo lo que ese renglón muestra; sin items ni imágenes (§23).
+        const partesPorMesa = await partesCobradasDe(openOrders.map(o => o.id), biz);
+
+        const result = tables.map(t => {
+            const o = orderByTable[t.id];
+            return {
+                ...t.toJSON(),
+                open_order: o ? { ...o.toJSON(), partes: partesPorMesa[o.id] || [] } : null,
+            };
+        });
 
         res.json(result);
     } catch (err) {

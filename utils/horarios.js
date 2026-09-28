@@ -215,6 +215,7 @@ const ETIQUETAS = {
     cash_movement:        ['movimiento de caja', 'movimientos de caja'],
     cash_movement_void:   ['anulación de caja', 'anulaciones de caja'],
     remove_item:          ['producto quitado de una cuenta', 'productos quitados de cuentas'],
+    separar_cuenta:       ['parte de una cuenta cobrada', 'partes de cuentas cobradas'],
 };
 
 function _frase(tipo, n) {
