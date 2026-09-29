@@ -245,7 +245,11 @@ router.post('/verify-pin', pinLimiter, authenticate, async (req, res) => {
         if (!role || !pin) {
             return res.status(400).json({ error: 'role y pin son requeridos' });
         }
-        if (!/^d{4,8}$/.test(pin)) {
+        // ⚠️ `\d`, no `d`: el commit f09b56a perdió la barra y durante semanas
+        // TODO PIN numérico respondía 400 → el celular no podía entrar a ningún
+        // puesto con PIN (ni descontar, cancelar, ajustar…). Lo fija
+        // tests/pin-de-puesto.test.js («POST /settings/verify-pin»).
+        if (!/^\d{4,8}$/.test(String(pin))) {
             return res.status(400).json({ error: 'El PIN debe ser entre 4 y 8 dígitos numéricos' });
         }
 

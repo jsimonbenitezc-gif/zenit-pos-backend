@@ -90,6 +90,32 @@ afterAll(async () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
+// El celular SIEMPRE pregunta aquí antes de actuar (elegir perfil, descuento,
+// cancelar…). Nadie probaba esta ruta y una `\d` perdida (`/^d{4,8}$/`) la dejó
+// respondiendo 400 a todo PIN numérico: ningún puesto con PIN podía entrar.
+describe('POST /settings/verify-pin — la consulta previa del celular', () => {
+    const verificar = (body) => request(app)
+        .post('/api/settings/verify-pin').set(auth(ownerToken)).send(body);
+
+    test('El PIN correcto del puesto responde valid: true', async () => {
+        const res = await verificar({ role: 'cajero', pin: PIN_CAJERO });
+        expect(res.status).toBe(200);
+        expect(res.body.valid).toBe(true);
+    });
+
+    test('Un PIN numérico equivocado responde 200 valid: false (no 400)', async () => {
+        const res = await verificar({ role: 'cajero', pin: '9999' });
+        expect(res.status).toBe(200);
+        expect(res.body.valid).toBe(false);
+    });
+
+    test('Un PIN que no son 4–8 dígitos sí es 400', async () => {
+        expect((await verificar({ role: 'cajero', pin: 'dddd' })).status).toBe(400);
+        expect((await verificar({ role: 'cajero', pin: '12' })).status).toBe(400);
+    });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 describe('§12.2 — Cancelar un pedido con el PIN del puesto', () => {
 
     test('El cajero cancela con `role` + su PIN de puesto', async () => {
